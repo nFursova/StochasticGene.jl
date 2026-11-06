@@ -1,0 +1,61 @@
+# Base for make_direct_sweep.py: everything except the coupling schemes.
+# Direct coupling between the observed genes, no hidden unit.
+#   gene1 = CCAT1-3Prime-new
+#   gene2 = MYC-new
+# source_state is the promoter (G) state of the source gene; 3 is the
+# initiation-competent state of the 3301 model.
+
+[simulation]
+output_dir = "analysis/direct_coupling/CCAT1-3Prime-new__MYC-new"
+nsim = 3                 # replicate datasets per scenario
+ntraces = 137
+nframes = 216
+interval_min = 1.6666666666666667
+max_lag_min = 120.0
+burst_max_delay_min = 360.0
+seed = 20261106
+equilibration_timescales = 8.0
+max_scenarios = 100000
+noise_params = [0.011157697805109171, 0.14534018465837603,
+                1.1527874228013875, 0.4283463857396756]
+save_baseline_binary = true
+
+[hidden]
+topology = "none"
+
+[coupling_defaults]
+# Base rates are solved on the joint promoter chain so that each coupled rate's
+# stationary time average equals the supplied rate.
+rate_reference = "time_average"
+
+[gene1]
+# CCAT1-3Prime-new
+R12 = 0.001052272
+R21 = 0.001840061
+R23 = 0.06260763
+R32 = 0.229397187
+Initiate = 0.211672262
+Rshift1 = 0.222604643
+Rshift2 = 0.221749483
+Eject = 0.077586457
+Decay = 1.0
+
+[gene2]
+# MYC-new
+R12 = 0.013173741
+R21 = 0.010254667
+R23 = 0.049939778
+R32 = 0.079351137
+Initiate = 0.297330069
+Rshift1 = 0.986950813
+Rshift2 = 1.385360242
+Eject = 0.683227291
+Decay = 1.0
+
+[sweep]
+# Fold 1 is covered by the generated "uncoupled" scheme.
+coupling_fold = [3.0, 10.0, 30.0, 100.0]
+
+# [scoring]
+# experimental_csv = "data/experimental.csv"
+# max_lag_min = 90.0

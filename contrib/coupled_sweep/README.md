@@ -25,6 +25,32 @@ suffix `_scenarios_FIRST-LAST`:
 julia -t 16 --project=$SG_PROJECT contrib/coupled_sweep/simulate_coupled_sweep.jl CONFIG.toml 1 96
 ```
 
+## Direct and reciprocal coupling configs
+
+`direct_CCAT1_MYC_sweep.toml` is generated; to change it, edit `direct_base.toml`
+and regenerate:
+
+```bash
+python3 contrib/coupled_sweep/make_direct_sweep.py contrib/coupled_sweep/direct_base.toml contrib/coupled_sweep/direct_CCAT1_MYC_sweep.toml
+```
+
+Default rate sets: R12, R21, R23, R32, Initiate, R12+R23, R21+R32,
+R12+R23+Initiate and R21+R32+Initiate. The source gene regulates from promoter
+state 3. The generated schemes are:
+
+- 1 uncoupled control
+- 9 CCAT1 → MYC
+- 9 MYC → CCAT1
+- 81 reciprocal (every pairing of the two directions)
+
+With 4 folds that makes 400 scenarios, each with 3 replicate datasets
+(`nsim = 3`). Useful options:
+
+- `--source-states 1 2 3`
+- `--rate-sets R12 Initiate`
+- `--mode inhibit`
+- `--no-one-way`
+
 ## Configuration additions
 
 | Setting | Meaning |
