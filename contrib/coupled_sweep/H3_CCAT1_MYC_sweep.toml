@@ -1,0 +1,93 @@
+# Three-state hidden unit (chain 1 <-> 2 <-> 3). Hidden state 1 regulates gene1
+# and state 3 regulates gene2, so the two genes are never activated together.
+# CHECK this source-state choice against simulate_shared_hidden_sweep_looping.jl.
+#   gene1 = CCAT1-3Prime-new
+#   gene2 = MYC-new
+
+[simulation]
+output_dir = "analysis/exclusive_looping_H3/CCAT1-3Prime-new__MYC-new"
+nsim = 3
+ntraces = 137
+nframes = 216
+interval_min = 1.6666666666666667
+max_lag_min = 120.0
+burst_max_delay_min = 360.0
+seed = 20261106
+equilibration_timescales = 8.0
+max_scenarios = 100000
+noise_params = [0.011157697805109171, 0.14534018465837603,
+                1.1527874228013875, 0.4283463857396756]
+save_baseline_binary = true
+
+[hidden]
+topology = "H3"
+# symmetric = true sets R23 = R21 and R32 = R12; then sweep only hidden_R12/R21.
+R12 = 0.1
+R21 = 0.1
+R23 = 0.1
+R32 = 0.1
+
+[coupling_defaults]
+rate_reference = "time_average"
+
+[gene1]
+# CCAT1-3Prime-new
+R12 = 0.001052272
+R21 = 0.001840061
+R23 = 0.06260763
+R32 = 0.229397187
+Initiate = 0.211672262
+Rshift1 = 0.222604643
+Rshift2 = 0.221749483
+Eject = 0.077586457
+Decay = 1.0
+
+[gene2]
+# MYC-new
+R12 = 0.013173741
+R21 = 0.010254667
+R23 = 0.049939778
+R32 = 0.079351137
+Initiate = 0.297330069
+Rshift1 = 0.986950813
+Rshift2 = 1.385360242
+Eject = 0.683227291
+Decay = 1.0
+
+[sweep]
+coupling_scheme = ["R12_activate", "Initiate_activate"]
+coupling_fold = [1.0, 10.0, 100.0, 1000.0]
+hidden_R12 = [1.0, 0.1, 0.01]   # leave state 1 (end the gene1-activating dwell)
+hidden_R32 = [1.0, 0.1, 0.01]   # leave state 3 (end the gene2-activating dwell)
+
+[[coupling]]
+scheme = "R12_activate"
+source = "hidden"
+source_state = 1
+target = "gene1"
+rates = ["R12"]
+mode = "activate"
+
+[[coupling]]
+scheme = "R12_activate"
+source = "hidden"
+source_state = 3
+target = "gene2"
+rates = ["R12"]
+mode = "activate"
+
+[[coupling]]
+scheme = "Initiate_activate"
+source = "hidden"
+source_state = 1
+target = "gene1"
+rates = ["Initiate"]
+mode = "activate"
+
+[[coupling]]
+scheme = "Initiate_activate"
+source = "hidden"
+source_state = 3
+target = "gene2"
+rates = ["Initiate"]
+mode = "activate"

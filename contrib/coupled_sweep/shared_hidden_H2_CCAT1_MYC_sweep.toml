@@ -1,0 +1,126 @@
+# Your original shared_hidden_CCAT1_3Prime_new_MYC_new_sweep.toml, unchanged
+# except for the commented optional settings. It gives the same model as before:
+# [hidden] without a topology key is the two-state unit, and coupling blocks
+# without a source come from hidden state 2.
+#   gene1 = CCAT1-3Prime-new
+#   gene2 = MYC-new
+# All kinetic quantities are rates per minute.
+
+[simulation]
+output_dir = "analysis/shared_enhancer_heterotypic_sweep_short_average_matched/CCAT1-3Prime-new__MYC-new"
+nsim = 3
+ntraces = 150
+nframes = 216
+interval_min = 1.6666666666666667
+max_lag_min = 120.0
+burst_max_delay_min = 360.0
+seed = 20260903
+# Burn-in = equilibration_timescales x the model's slowest relaxation time
+# (exact for the promoter chain). 10 matches the original setting; 7 to 8 is
+# still well equilibrated (initial-state bias below ~0.1%).
+equilibration_timescales = 10.0
+# warmup_min = 3000.0                # fixed burn-in instead, if preferred
+max_scenarios = 100000
+noise_params = [0.011157697805109171, 0.14534018465837603,
+                1.1527874228013875, 0.4283463857396756]
+save_baseline_binary = true
+# epsilon = 1e-7                     # added to traces for the six multi-tau curves, as in experimental.R
+# trace_lengths_csv = "data/experimental_lengths.csv"   # simulate the experimental trace lengths
+#                                    # (replaces ntraces and nframes)
+
+[hidden]
+# topology = "H2"                    # default when [hidden] is present
+R12 = 0.1
+R21 = 0.1
+
+[coupling_defaults]
+# The supplied gene rates are enhancer-occupancy-weighted time-average rates.
+# At active fraction p and fold F, OFF = supplied/((1-p)+p*F), and ON = F*OFF.
+rate_reference = "time_average"
+
+[gene1]
+# CCAT1-3Prime-new
+R12 = 0.001052272
+R21 = 0.001840061
+R23 = 0.06260763
+R32 = 0.229397187
+Initiate = 0.211672262
+Rshift1 = 0.222604643
+Rshift2 = 0.221749483
+Eject = 0.077586457
+Decay = 1.0
+
+[gene2]
+# MYC-new
+R12 = 0.013173741
+R21 = 0.010254667
+R23 = 0.049939778
+R32 = 0.079351137
+Initiate = 0.297330069
+Rshift1 = 0.986950813
+Rshift2 = 1.385360242
+Eject = 0.683227291
+Decay = 1.0
+
+[sweep]
+# Fold 1 is the uncoupled control. Each named scheme is an alternative model;
+# the two blocks within a scheme act simultaneously on gene1 and gene2.
+coupling_scheme = ["R12_activate", "R23_activate", "Initiate_activate", "hub_gate"]
+coupling_fold = [1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0]
+hidden_R12 = [10.0, 1.0, 0.1, 0.01]
+hidden_R21 = [10.0, 1.0, 0.1, 0.01]
+gene1_scale = [1.0]
+gene2_scale = [1.0]
+
+# Optional: score each scenario's mean curves against experimental.R output.
+# [scoring]
+# experimental_csv = "data/experimental.csv"
+# max_lag_min = 90.0
+
+[[coupling]]
+scheme = "R12_activate"
+target = "gene1"
+rates = ["R12"]
+mode = "activate"
+
+[[coupling]]
+scheme = "R12_activate"
+target = "gene2"
+rates = ["R12"]
+mode = "activate"
+
+[[coupling]]
+scheme = "R23_activate"
+target = "gene1"
+rates = ["R23"]
+mode = "activate"
+
+[[coupling]]
+scheme = "R23_activate"
+target = "gene2"
+rates = ["R23"]
+mode = "activate"
+
+[[coupling]]
+scheme = "Initiate_activate"
+target = "gene1"
+rates = ["Initiate"]
+mode = "activate"
+
+[[coupling]]
+scheme = "Initiate_activate"
+target = "gene2"
+rates = ["Initiate"]
+mode = "activate"
+
+[[coupling]]
+scheme = "hub_gate"
+target = "gene1"
+rates = ["R12", "R23", "Initiate"]
+mode = "activate"
+
+[[coupling]]
+scheme = "hub_gate"
+target = "gene2"
+rates = ["R12", "R23", "Initiate"]
+mode = "activate"
