@@ -71,13 +71,14 @@ function read_config(path)
 end
 
 # ---------------------------------------------------------------------------
-# 2. Model: connections and base rates
+# 2. Model: connections, states and base rates
 # ---------------------------------------------------------------------------
 
 "One connection: while unit `source` is in `state`, rate `rate` of gene `target` is multiplied by the fold."
 struct Edge
     source::Int    # 1 = E, 2 = G, 3 = H
-    state::Int
+    state::Int     # promoter state 1 to 3 (hidden state for H), or 4 = "R": StochasticGene's Rsum,
+                   # every occupied reporter position of the source gene adds one coupling effect
     target::Int    # 1 = E, 2 = G
     rate::Int      # index into RATE_NAMES
 end
@@ -91,55 +92,87 @@ struct Model
     base::Matrix{Float64}           # 2 x 9 rates while no source is active: row 1 = E, row 2 = G
 end
 
-# Joint promoter state p of (E promoter state, G promoter state, hidden state).
+# A state of the whole system is (p, bits_E, bits_G):
+#   p        joint promoter state of (E promoter state, G promoter state, hidden state)
+#   bits_E   occupied reporter positions of E: bit 1, 2, 4 = position 1, 2, 3 (so 0 to 7); bits_G likewise for G
 pindex(e, g, h) = e + 3 * (g - 1) + 9 * (h - 1)
 pstate(p) = (mod(p - 1, 3) + 1, mod(div(p - 1, 3), 3) + 1, div(p - 1, 9) + 1)
+npromoter(model) = 9 * model.nh
+sindex(model, p, bits_E, bits_G) = p + npromoter(model) * (bits_E + 8 * bits_G)
+function sstate(model, s)
+    code = div(s - 1, npromoter(model))
+    mod(s - 1, npromoter(model)) + 1, code % 8, div(code, 8)
+end
 
-"Multiplier of rate k of gene u in joint promoter state p: 1 + gamma for every active connection onto it."
-function factor(model, p, u, k)
+"How many coupling effects a connection contributes in this state: 1 if its source is in the regulating promoter
+(or hidden) state, else 0; for R, the number of occupied reporter positions of the source gene (0 to 3)."
+function activity(edge, p, bits_E, bits_G)
+    edge.state == 4 && return count_ones(edge.source == 1 ? bits_E : bits_G)
+    Int(pstate(p)[edge.source] == edge.state)
+end
+
+"Multiplier of rate k of gene u in state (p, bits_E, bits_G): 1 + gamma for every active coupling effect onto it."
+function factor(model, p, bits_E, bits_G, u, k)
     f = 1.0
     for edge in model.edges
-        edge.target == u && edge.rate == k && pstate(p)[edge.source] == edge.state && (f += model.gamma)
+        edge.target == u && edge.rate == k && (f += model.gamma * activity(edge, p, bits_E, bits_G))
     end
     f
 end
 
-"Transition-rate matrix of the joint promoter states: Q[q, p] is the rate from p to q."
-function promoter_generator(model, base)
-    np = 9 * model.nh
-    Q = zeros(np, np)
-    function add(p, q, rate)
-        Q[q, p] += rate
-        Q[p, p] -= rate
-    end
-    for p in 1:np
+"Every transition of the system for given base rates: for each state, the states it can jump to and at what rates."
+function system_transitions(model, base)
+    n = 64 * npromoter(model)
+    destinations = [Int[] for _ in 1:n]
+    rates = [Float64[] for _ in 1:n]
+    for bits_G in 0:7, bits_E in 0:7, p in 1:npromoter(model)
+        s = sindex(model, p, bits_E, bits_G)
         e, g, h = pstate(p)
-        for (k, (from, to)) in enumerate(GENE_TRANSITIONS)
-            e == from && add(p, pindex(to, g, h), base[1, k] * factor(model, p, 1, k))
-            g == from && add(p, pindex(e, to, h), base[2, k] * factor(model, p, 2, k))
+        function add(target, value)
+            push!(destinations[s], target)
+            push!(rates[s], value)
         end
-        for (k, (from, to)) in enumerate(GENE_TRANSITIONS[1:length(model.hidden_rates)])
-            h == from && add(p, pindex(e, g, to), model.hidden_rates[k])
+        rate(u, k) = base[u, k] * factor(model, p, bits_E, bits_G, u, k)
+        for (k, (from, to)) in enumerate(GENE_TRANSITIONS)                                 # promoter transitions
+            e == from && add(sindex(model, pindex(to, g, h), bits_E, bits_G), rate(1, k))
+            g == from && add(sindex(model, pindex(e, to, h), bits_E, bits_G), rate(2, k))
+        end
+        for (k, (from, to)) in enumerate(GENE_TRANSITIONS[1:length(model.hidden_rates)])   # hidden unit
+            h == from && add(sindex(model, pindex(e, g, to), bits_E, bits_G), model.hidden_rates[k])
+        end
+        for u in 1:2                                                                       # reporter steps of gene u
+            bits = u == 1 ? bits_E : bits_G
+            with(b) = u == 1 ? sindex(model, p, b, bits_G) : sindex(model, p, bits_E, b)
+            (u == 1 ? e : g) == 3 && bits & 1 == 0 && add(with(bits | 1), rate(u, 5))      # initiate into empty position 1
+            bits & 1 != 0 && bits & 2 == 0 && add(with(xor(bits, 3)), rate(u, 6))          # move 1 -> 2
+            bits & 2 != 0 && bits & 4 == 0 && add(with(xor(bits, 6)), rate(u, 7))          # move 2 -> 3
+            bits & 4 != 0 && add(with(xor(bits, 4)), rate(u, 8))                           # eject from position 3
         end
     end
-    Q
+    destinations, rates
 end
 
-"Long-run probability of every joint promoter state."
-function stationary(Q)
-    A = copy(Q)
-    A[end, :] .= 1.0                    # replace one balance equation by: probabilities sum to 1
-    b = zeros(size(Q, 1))
-    b[end] = 1.0
-    prob = max.(A \ b, 0.0)
+"Long-run probability of every state: balance equations, with the last one replaced by 'probabilities sum to 1'."
+function stationary(destinations, rates)
+    n = length(rates)
+    I, J, V = Int[], Int[], Float64[]
+    for s in 1:n
+        for (target, rate) in zip(destinations[s], rates[s])
+            target < n && (push!(I, target); push!(J, s); push!(V, rate))
+        end
+        s < n && (push!(I, s); push!(J, s); push!(V, -sum(rates[s])))
+        push!(I, n); push!(J, s); push!(V, 1.0)
+    end
+    prob = max.(sparse(I, J, V, n, n) \ [zeros(n - 1); 1.0], 0.0)
     prob ./ sum(prob)
 end
 
 """
 Base rates that keep every regulated rate's long-run average equal to its fitted value, as
-`rate_reference = "time_average"` did in simulate_shared_hidden_sweep.jl. With a hidden source this is
-fitted / ((1 - p) + p * fold). With a gene as source the source's occupancy depends on the coupling,
-so the base rates are solved with Newton's method on the joint promoter chain.
+`rate_reference = "time_average"` did in simulate_shared_hidden_sweep.jl: base = fitted / (1 + gamma * a),
+where a is the long-run average number of active coupling effects (the fraction of time the source is in its
+regulating state). With a gene as source, a can depend on the coupling itself, so the base rates are solved
+with Newton's method.
 """
 function base_rates(model, fitted)
     regulated = unique([(edge.target, edge.rate) for edge in model.edges])
@@ -149,8 +182,8 @@ function base_rates(model, fitted)
         for ((u, k), value) in zip(regulated, x)
             base[u, k] = exp(value)
         end
-        prob = stationary(promoter_generator(model, base))
-        average(u, k) = base[u, k] * sum(prob[p] * factor(model, p, u, k) for p in eachindex(prob))
+        prob = stationary(system_transitions(model, base)...)
+        average(u, k) = base[u, k] * sum(prob[s] * factor(model, sstate(model, s)..., u, k) for s in eachindex(prob))
         [log(average(u, k) / fitted[u, k]) for (u, k) in regulated], base
     end
     x = [log(fitted[u, k]) for (u, k) in regulated]
@@ -179,8 +212,9 @@ function build_model(row, fitted)
             push!(edges, Edge(source, state, target, findfirst(==(name), RATE_NAMES)))
         end
     end
-    connect("EG_rates", 1, 3, 2)                      # E in promoter state 3 regulates G
-    connect("GE_rates", 2, 3, 1)                      # G in promoter state 3 regulates E
+    gene_state(text) = text == "R" ? 4 : parse(Int, text)                               # EG_state / GE_state: 1, 2, 3 or R (Rsum)
+    isempty(row["EG_rates"]) || connect("EG_rates", 1, gene_state(row["EG_state"]), 2)   # E regulates G
+    isempty(row["GE_rates"]) || connect("GE_rates", 2, gene_state(row["GE_state"]), 1)   # G regulates E
     connect("HE_rates", 3, nh == 2 ? 2 : 1, 1)        # H2: hidden state 2 regulates both genes
     connect("HG_rates", 3, nh == 2 ? 2 : 3, 2)        # H3: hidden state 1 regulates E, state 3 regulates G
     hidden_rates = Float64[parse(Float64, row[name]) for name in ("h12", "h21", "h23", "h32")[1:2*(nh-1)]]
@@ -194,53 +228,17 @@ end
 # ---------------------------------------------------------------------------
 
 """
-Lists every state of the whole system (joint promoter state, and which of the three reporter positions
-of each gene are occupied: 9 * nh * 8 * 8 states), starts each trace from the exact long-run
-distribution, so no burn-in is needed, and runs a standard Gillespie simulation.
+Uses the list of all states and transitions of the system (9 * nh * 8 * 8 states), starts each trace from
+the exact long-run distribution, so no burn-in is needed, and runs a standard Gillespie simulation.
 Returns reporter counts [frame, trace, gene].
 """
 function simulate_fast(model, cfg, rng)
-    np = 9 * model.nh
-    n = 64 * np
-    Qp = promoter_generator(model, model.base)
-    # State s = p + np * (bits_E + 8 * bits_G); bit 1, 2, 4 = reporter position 1, 2, 3 occupied.
-    destinations = [Int[] for _ in 1:n]
-    rates = [Float64[] for _ in 1:n]
-    for bits_G in 0:7, bits_E in 0:7, p in 1:np
-        s = p + np * (bits_E + 8 * bits_G)
-        function add(target, rate)
-            push!(destinations[s], target)
-            push!(rates[s], rate)
-        end
-        for q in 1:np                                       # promoter and hidden transitions
-            q != p && Qp[q, p] > 0 && add(q + np * (bits_E + 8 * bits_G), Qp[q, p])
-        end
-        for u in 1:2                                        # reporter steps of gene u
-            bits = u == 1 ? bits_E : bits_G
-            with(b) = u == 1 ? p + np * (b + 8 * bits_G) : p + np * (bits_E + 8 * b)
-            rate(k) = model.base[u, k] * factor(model, p, u, k)
-            pstate(p)[u] == 3 && bits & 1 == 0 && add(with(bits | 1), rate(5))        # initiate into empty position 1
-            bits & 1 != 0 && bits & 2 == 0 && add(with(xor(bits, 3)), rate(6))        # move 1 -> 2
-            bits & 2 != 0 && bits & 4 == 0 && add(with(xor(bits, 6)), rate(7))        # move 2 -> 3
-            bits & 4 != 0 && add(with(xor(bits, 4)), rate(8))                         # eject from position 3
-        end
-    end
-    # Long-run probability of every state: balance equations, with the last one replaced by "probabilities sum to 1".
-    I, J, V = Int[], Int[], Float64[]
-    for s in 1:n
-        for (target, rate) in zip(destinations[s], rates[s])
-            target < n && (push!(I, target); push!(J, s); push!(V, rate))
-        end
-        s < n && (push!(I, s); push!(J, s); push!(V, -sum(rates[s])))
-        push!(I, n); push!(J, s); push!(V, 1.0)
-    end
-    prob = max.(sparse(I, J, V, n, n) \ [zeros(n - 1); 1.0], 0.0)
-    start = cumsum(prob ./ sum(prob))                       # used to draw the starting state of each trace
+    destinations, rates = system_transitions(model, model.base)
+    start = cumsum(stationary(destinations, rates))         # used to draw the starting state of each trace
     cumulative = cumsum.(rates)                             # used to draw which event happens next
-
     counts = zeros(Int, cfg.nframes, cfg.ntraces, 2)
     for trace in 1:cfg.ntraces
-        s = min(searchsortedfirst(start, rand(rng)), n)
+        s = min(searchsortedfirst(start, rand(rng)), length(start))
         next_event = randexp(rng) / cumulative[s][end]
         for frame in 1:cfg.nframes
             while next_event <= (frame - 1) * cfg.interval
@@ -248,9 +246,9 @@ function simulate_fast(model, cfg, rng)
                 s = destinations[s][min(choice, end)]
                 next_event += randexp(rng) / cumulative[s][end]
             end
-            bits = div(s - 1, np)
-            counts[frame, trace, 1] = count_ones(bits % 8)
-            counts[frame, trace, 2] = count_ones(div(bits, 8))
+            _, bits_E, bits_G = sstate(model, s)
+            counts[frame, trace, 1] = count_ones(bits_E)
+            counts[frame, trace, 2] = count_ones(bits_G)
         end
     end
     counts
@@ -271,20 +269,39 @@ Returns reporter counts [frame, trace, gene].
 function simulate_stochasticgene(model, cfg)
     hidden = model.nh > 1
     unit(u) = hidden ? (u == 3 ? 1 : u + 1) : u            # StochasticGene unit order: [H, E, G] or [E, G]
+    # StochasticGene starts every unit in state 1 and draws its first reaction times without the coupling,
+    # so no unit may start in a state that regulates. Three adjustments, for the StochasticGene call only:
+    #   H3: the hidden states are renumbered. Its state 1 is our middle state 2, its state 2 is our state 1
+    #       (regulates E), state 3 stays state 3 (regulates G). H2 needs nothing (state 2 regulates).
+    #   A gene regulating from promoter state 1: "state 1 multiplies the rate by fold" is written the
+    #       equivalent way round: the rate is fold times higher, and states 2 and 3 divide it by fold.
+    #   R is StochasticGene's Rsum: one connection from each reporter position (source states 4, 5, 6).
+    renumber(state) = model.nh == 3 ? (2, 1, 3)[state] : state
+    hidden_transitions = model.nh == 3 ? ((2, 1), (1, 2), (1, 3), (3, 1)) : GENE_TRANSITIONS[1:2]    # order of h12 h21 h23 h32
+    base = copy(model.base)
+    connections = NTuple{4,Int}[]       # (source unit, source state, target unit, target rate)
+    gammas = Float64[]                  # one coupling strength per connection
+    for edge in model.edges
+        if edge.source != 3 && edge.state == 1
+            base[edge.target, edge.rate] *= 1 + model.gamma
+            for state in (2, 3)
+                push!(connections, (unit(edge.source), state, unit(edge.target), edge.rate))
+                push!(gammas, 1 / (1 + model.gamma) - 1)
+            end
+        else
+            states = edge.source == 3 ? (renumber(edge.state),) : edge.state == 4 ? (4, 5, 6) : (edge.state,)
+            for state in states
+                push!(connections, (unit(edge.source), state, unit(edge.target), edge.rate))
+                push!(gammas, model.gamma)
+            end
+        end
+    end
     rates = Float64[]
     hidden && append!(rates, model.hidden_rates, (0.0, 0.0))    # two unused RNA slots of the hidden unit
     for u in 1:2
-        append!(rates, model.base[u, :], NOISE)
+        append!(rates, base[u, :], NOISE)
     end
-    append!(rates, fill(model.gamma, length(model.edges)))      # one coupling strength per connection
-    # StochasticGene starts every unit in state 1 and draws its first reaction times without the coupling,
-    # so the hidden unit must start in a state that regulates nothing. H2 does (state 2 regulates).
-    # For H3 the hidden states are renumbered for StochasticGene only: its state 1 is our middle state 2,
-    # its state 2 is our state 1 (regulates E), state 3 stays state 3 (regulates G).
-    renumber(state) = model.nh == 3 ? (2, 1, 3)[state] : state
-    hidden_transitions = model.nh == 3 ? ((2, 1), (1, 2), (1, 3), (3, 1)) : GENE_TRANSITIONS[1:2]    # order of h12 h21 h23 h32
-    connections = [(unit(edge.source), edge.source == 3 ? renumber(edge.state) : edge.state, unit(edge.target), edge.rate)
-                   for edge in model.edges]
+    append!(rates, gammas)
     transitions = hidden ? (hidden_transitions, GENE_TRANSITIONS, GENE_TRANSITIONS) : (GENE_TRANSITIONS, GENE_TRANSITIONS)
     G = hidden ? (model.nh, 3, 3) : (3, 3)
     R = hidden ? (0, 3, 3) : (3, 3)

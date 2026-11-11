@@ -62,7 +62,7 @@ def load(config_path):
     folder = config_path.parent
     run_dir = folder / config["output"]["run_dir"]
     read_all = lambda pattern: pd.concat([pd.read_csv(f) for f in sorted((run_dir / "results").glob(pattern))])
-    simulations = pd.read_csv(run_dir / "simulations.csv")
+    simulations = pd.read_csv(run_dir / "simulations.csv", dtype={"EG_state": str, "GE_state": str})
     metrics, curves = read_all("metrics_*.csv"), read_all("curves_*.csv")
     experiment = pd.read_csv(folder / config["inputs"]["experimental_curves"])
     experiment_on = pd.read_csv(folder / config["inputs"]["experimental_metrics"]).set_index("metric")["mean"]
@@ -94,8 +94,8 @@ def regulated_rates(sim):
     """Which rates a model regulates, and which unit and state regulates each."""
     hidden_states = ("H state 2", "H state 2") if sim["hidden"] == "H2" else ("H state 1", "H state 3")
     regulated = []
-    for column, gene, source in [("GE_rates", "E", "G state 3"), ("HE_rates", "E", hidden_states[0]),
-                                 ("EG_rates", "G", "E state 3"), ("HG_rates", "G", hidden_states[1])]:
+    for column, gene, source in [("GE_rates", "E", f'G state {sim["GE_state"]}'), ("HE_rates", "E", hidden_states[0]),
+                                 ("EG_rates", "G", f'E state {sim["EG_state"]}'), ("HG_rates", "G", hidden_states[1])]:
         if pd.notna(sim[column]):
             regulated += [dict(gene=gene, rate=rate, by=source, index=BASE_COLUMNS.index(f"base_{gene}_{rate}"))
                           for rate in sim[column].split("+")]
@@ -413,11 +413,12 @@ function rateTable(sims, vary) {                // the regulated rates of the dr
   for (const r of regulated) {
     const fitted = DATA.fitted[r.index];
     rows += `<tr><td>${r.gene === "E" ? "CCAT1" : "MYC"} ${r.rate}</td><td>${r.by}</td><td>${f(fitted)}</td>` + sims.map(s => {
-      const base = s.base[r.index], fold = s.par.fold;
-      return `<td>${f(base)} → ${f(base * fold)}` + (fold > 1 ? ` (${(100 * (fitted / base - 1) / (fold - 1)).toFixed(0)}% of the time)` : "") + "</td>";
+      const base = s.base[r.index], fold = s.par.fold, activity = (fitted / base - 1) / (fold - 1);
+      const when = r.by.endsWith(" R") ? ` per occupied reporter position (mean ${activity.toFixed(2)} occupied)` : ` (${(100 * activity).toFixed(0)}% of the time)`;
+      return `<td>${f(base)} → ${f(base * fold)}` + (fold > 1 ? when : "") + "</td>";
     }).join("") + "</tr>";
   }
-  $("rates").innerHTML = `<table>${rows}</table><p class="sub">Rates per minute. Base = the rate while its source is inactive; regulated = base × fold.
+  $("rates").innerHTML = `<table>${rows}</table><p class="sub">Rates per minute. Base = the rate while its source is inactive; regulated = base × fold. For source state R every occupied reporter position of the source gene adds (fold − 1) × base.
     The base is set so that the long-run average equals the fitted rate. All other rates equal their fitted values.</p>`;
 }
 for (const s of DATA.sims) {                   // mean and SE over the replicates, for every curve and lag

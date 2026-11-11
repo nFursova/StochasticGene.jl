@@ -90,9 +90,9 @@ Each swarm job writes one `curves_` and one `metrics_` file, named by its first 
 | Group | Coupling | Parameters swept |
 |---|---|---|
 | `uncoupled` | none (control) | none |
-| `E_to_G` | CCAT1 in promoter state 3 regulates MYC | fold |
-| `G_to_E` | MYC in promoter state 3 regulates CCAT1 | fold |
-| `reciprocal` | both, same fold | fold |
+| `E_to_G` | CCAT1 regulates MYC from one source state: promoter state 1, 2, 3, or R | fold |
+| `G_to_E` | MYC regulates CCAT1 from one source state: promoter state 1, 2, 3, or R | fold |
+| `reciprocal` | both directions, each from promoter state 3, same fold | fold |
 | `H2` | hidden state 2 regulates both genes | fold, h12, h21 |
 | `H3_symmetric` | hidden state 1 regulates CCAT1, state 3 regulates MYC, state 2 nothing; h32 = h12, h23 = h21 | fold, h12, h21 |
 | `H3_asymmetric` | same; four independent rates | fold, h12, h21, h23, h32 |
@@ -100,6 +100,8 @@ Each swarm job writes one `curves_` and one `metrics_` file, named by its first 
 - Regulated rates: each model multiplies one of nine rate sets by the fold: R12, R21, R23, R32,
   Initiate, R12+R23, R21+R32, R12+R23+Initiate, R21+R32+Initiate. Reciprocal models take every
   pairing of the two directions (81 models).
+- Source state R is StochasticGene's `Rsum`: every occupied reporter position of the source gene adds one
+  coupling effect, so the rate is multiplied by 1 + (fold − 1) × (number of occupied positions).
 - Controls: every group also has one model with fold 1 (gamma = 0).
 - Rate matching: base rates are rescaled so that each regulated rate's long-run average equals its
   fitted value, as `rate_reference = "time_average"` did in the original sweep.

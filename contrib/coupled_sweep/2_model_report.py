@@ -14,9 +14,12 @@ PARAMETERS = {"fold": "coupling fold", "h12": "hidden rate h12 (1 → 2), per mi
 
 GROUP_TEXT = {
     "uncoupled": "Two independent genes. The control for every other group.",
-    "E_to_G": "While CCAT1 (E) is in promoter state 3, the chosen rates of MYC (G) are multiplied by the fold.",
-    "G_to_E": "While MYC (G) is in promoter state 3, the chosen rates of CCAT1 (E) are multiplied by the fold.",
-    "reciprocal": "Both directions at once, with the same fold. Each direction has its own choice of rates.",
+    "E_to_G": "CCAT1 (E) regulates MYC (G) from one source state: promoter state 1, 2 or 3 multiplies the chosen rates "
+              "of G by the fold; R (StochasticGene's Rsum) adds one coupling effect per occupied reporter position.",
+    "G_to_E": "MYC (G) regulates CCAT1 (E) from one source state: promoter state 1, 2 or 3 multiplies the chosen rates "
+              "of E by the fold; R (StochasticGene's Rsum) adds one coupling effect per occupied reporter position.",
+    "reciprocal": "Both directions at once, each from promoter state 3, with the same fold. "
+                  "Each direction has its own choice of rates.",
     "H2": "Two-state hidden unit. While it is in state 2, the chosen rates of both genes are multiplied by the fold.",
     "H3_symmetric": "Three-state hidden unit, mirror-symmetric rates (h23 = h21, h32 = h12). "
                     "State 1 multiplies the chosen rates of E, state 3 those of G; state 2 regulates nothing.",
@@ -70,9 +73,13 @@ def coupling(path, label_x, label_y):
 def schematic(group):
     parts = [gene(E_BOX, "E · CCAT1"), gene(G_BOX, "G · MYC")]
     e3, g3, state_y = E_BOX + 100, G_BOX + 100, BOX_Y + 40        # x of promoter state 3 of each gene
-    if group in ("E_to_G", "reciprocal"):       # from E state 3, over the top, onto G
+    one_way = group in ("E_to_G", "G_to_E")     # one-way models regulate from state 1, 2, 3 or R: arrow leaves the box
+    if one_way:
+        e3, g3 = E_BOX + 75, G_BOX + 75
+        state_y = BOX_Y + (12 if group == "E_to_G" else 50)
+    if group in ("E_to_G", "reciprocal"):       # from E (state 3 in reciprocal models), over the top, onto G
         parts.append(coupling(f"M{e3},{state_y - 12} C{e3},40 {G_BOX + 60},40 {G_BOX + 60},{BOX_Y - 4}", 178, 50))
-    if group in ("G_to_E", "reciprocal"):       # from G state 3, underneath, onto E
+    if group in ("G_to_E", "reciprocal"):       # from G (state 3 in reciprocal models), underneath, onto E
         parts.append(coupling(f"M{g3},{state_y + 12} C{g3},245 {E_BOX + 60},245 {E_BOX + 60},{BOX_Y + 66}", 178, 244))
     if group.startswith("H"):
         tied = group.endswith("_symmetric")
@@ -102,7 +109,19 @@ def chips(values):
 
 
 def regulated_rates(rows):
-    """Which rates the group's models regulate: a list, or for reciprocal models an E→G by G→E matrix."""
+    """Which rates the group's models regulate: a list, a source-state by rate matrix (one-way models),
+    or an E→G by G→E matrix (reciprocal models)."""
+    if rows[0]["group"] in ("E_to_G", "G_to_E"):
+        side = "EG" if rows[0]["group"] == "E_to_G" else "GE"
+        states = list(dict.fromkeys(m[f"{side}_state"] for m in rows))
+        sets = list(dict.fromkeys(m[f"{side}_rates"] for m in rows))
+        have = {(m[f"{side}_state"], m[f"{side}_rates"]) for m in rows}
+        head = "".join(f'<th class="rot"><span>{html.escape(r)}</span></th>' for r in sets)
+        body = "".join(f'<tr><th>source state {html.escape(s)}</th>' +
+                       "".join(f'<td class="{"on" if (s, r) in have else "off"}"></td>' for r in sets) + "</tr>" for s in states)
+        return (f'<p class="what">Rows = state of the regulating gene, columns = rates multiplied. '
+                f'A filled cell is one model ({len(have)} models).</p>'
+                f'<table class="matrix"><tr><th></th>{head}</tr>{body}</table>')
     if rows[0]["group"] == "reciprocal":
         eg = list(dict.fromkeys(m["EG_rates"] for m in rows))
         ge = list(dict.fromkeys(m["GE_rates"] for m in rows))

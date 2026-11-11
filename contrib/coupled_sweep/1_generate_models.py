@@ -21,6 +21,11 @@ from pathlib import Path
 RATE_SETS = ["R12", "R21", "R23", "R32", "Initiate",
              "R12+R23", "R21+R32", "R12+R23+Initiate", "R21+R32+Initiate"]
 
+# States of the source gene that regulate, in the one-way models (E_to_G and G_to_E):
+# promoter state 1, 2 or 3, or R = StochasticGene's "Rsum": every occupied reporter position of the source
+# gene adds one coupling effect, so the rate is multiplied by 1 + (fold - 1) * (number of occupied positions).
+SOURCE_STATES = ["1", "2", "3", "R"]
+
 # Hidden-unit rates that each hidden group sweeps ("free") and the rates set equal to them ("tied").
 #   H2: two hidden states 1 <-> 2; state 2 regulates both genes.
 #   H3: three hidden states 1 <-> 2 <-> 3; state 1 regulates E, state 3 regulates G, state 2 regulates nothing.
@@ -32,12 +37,13 @@ HIDDEN_GROUPS = {
 HIDDEN_RATES = ["h12", "h21", "h23", "h32"]
 
 
-def model(group, name, EG="", GE="", HE="", HG="", control=False):
-    """One model. EG = rates of G regulated by E (E in promoter state 3); GE = rates of E regulated by G;
-    HE and HG = rates of E and G regulated by the hidden unit."""
+def model(group, name, EG="", GE="", HE="", HG="", state="3", control=False):
+    """One model. EG = rates of G regulated by E; GE = rates of E regulated by G; `state` = the state of the
+    regulating gene (EG_state for E, GE_state for G). HE and HG = rates of E and G regulated by the hidden unit."""
     return dict(model_id=f"{group}__{name}" if name else group, group=group,
                 hidden=HIDDEN_GROUPS.get(group, {}).get("hidden", "none"),
-                EG_rates=EG, GE_rates=GE, HE_rates=HE, HG_rates=HG, control=control)
+                EG_state=state if EG else "", EG_rates=EG, GE_state=state if GE else "", GE_rates=GE,
+                HE_rates=HE, HG_rates=HG, control=control)
 
 
 def all_models():
@@ -45,11 +51,11 @@ def all_models():
     first = RATE_SETS[0]
     models = [model("uncoupled", "", control=True)]                      # no connections at all
     models.append(model("E_to_G", "gamma0", EG=first, control=True))
-    models += [model("E_to_G", r, EG=r) for r in RATE_SETS]
+    models += [model("E_to_G", f"state{s}__{r}", EG=r, state=s) for s in SOURCE_STATES for r in RATE_SETS]
     models.append(model("G_to_E", "gamma0", GE=first, control=True))
-    models += [model("G_to_E", r, GE=r) for r in RATE_SETS]
+    models += [model("G_to_E", f"state{s}__{r}", GE=r, state=s) for s in SOURCE_STATES for r in RATE_SETS]
     models.append(model("reciprocal", "gamma0", EG=first, GE=first, control=True))
-    models += [model("reciprocal", f"EG_{r}__GE_{q}", EG=r, GE=q) for r in RATE_SETS for q in RATE_SETS]
+    models += [model("reciprocal", f"EG_{r}__GE_{q}", EG=r, GE=q) for r in RATE_SETS for q in RATE_SETS]   # both from state 3
     for group in HIDDEN_GROUPS:                                           # the hidden unit regulates the same rates of E and G
         models.append(model(group, "gamma0", HE=first, HG=first, control=True))
         models += [model(group, r, HE=r, HG=r) for r in RATE_SETS]
