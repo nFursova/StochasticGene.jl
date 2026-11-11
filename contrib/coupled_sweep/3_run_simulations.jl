@@ -8,7 +8,8 @@ Step 3. Simulate the rows of simulations.csv and compare them with the experimen
 
 Each run writes two files into <run_dir>/results/:
     curves_<first>-<last>.csv    the six correlation curves of every simulation: mean and SE over replicates
-    metrics_<first>-<last>.csv   one row per simulation: ON fractions, mean reporter counts, NRMSE and CCC
+    metrics_<first>-<last>.csv   one row per simulation: ON fractions, mean reporter counts, NRMSE and CCC,
+                                 and the base rates (rates while no source is active)
 
 Names: E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit. Both genes are the 3301 model:
 promoter states 1 <-> 2 <-> 3, initiation from state 3, three reporter positions.
@@ -486,12 +487,13 @@ function run_simulations(rows, cfg, first_id, last_id)
     metrics_path = joinpath(folder, "metrics_$stem.csv")
     score_names = ["$(name)_$(observable)_$(pair)" for observable in OBSERVABLES for (pair, _, _) in PAIRS
                    for name in ("nrmse", "ccc")]
+    base_names = ["base_$(gene)_$(RATE_NAMES[k])" for gene in ("E", "G") for k in 1:5]      # R12 R21 R23 R32 Initiate
     # Write to temporary files first, so that a killed job never leaves a half-written result.
     open(curves_path * ".tmp", "w") do curves_io
         open(metrics_path * ".tmp", "w") do metrics_io
             println(curves_io, "sim_id,observable,pair,lag_frames,lag_min,mean,se")
             println(metrics_io, "sim_id,model_id,on_E,on_E_se,on_G,on_G_se,reporters_E,reporters_E_se," *
-                                "reporters_G,reporters_G_se," * join(score_names, ','))
+                                "reporters_G,reporters_G_se," * join(vcat(score_names, base_names), ','))
             for (i, row) in enumerate(rows)
                 replicates = results[(i - 1) * cfg.replicates .+ (1:cfg.replicates)]
                 bins = replicates[1].curves                                   # same lag bins in every replicate
@@ -512,6 +514,7 @@ function run_simulations(rows, cfg, first_id, last_id)
                     append!(cells, fmt.(nrmse_ccc([means[b][1] for b in use],
                                                   [cfg.targets[(observable, pair, bins[b].lag)] for b in use])))
                 end
+                append!(cells, fmt.(models[i].base[1, 1:5]), fmt.(models[i].base[2, 1:5]))
                 println(metrics_io, join(cells, ','))
             end
         end

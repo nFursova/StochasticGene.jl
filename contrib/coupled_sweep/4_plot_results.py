@@ -46,6 +46,8 @@ CURVES = [(observable, pair, f"{pair_name}, {observable_name}")
                                   ("GG", "MYC autocorrelation")]
           for observable, observable_name in [("binary", "ON/OFF state"), ("reporter", "reporter count")]]
 PARAMETERS = ["fold", "h12", "h21", "h23", "h32"]
+RATES = ["R12", "R21", "R23", "R32", "Initiate"]                      # the rates a connection can regulate
+BASE_COLUMNS = [f"base_{gene}_{rate}" for gene in "EG" for rate in RATES]
 INK, MUTED, BLUE = "#0b0b0b", "#898781", "#2a78d6"
 DIVERGING = LinearSegmentedColormap.from_list("blue_gray_red", ["#104281", "#2a78d6", "#f0efec", "#e34948", "#8f1f1f"])
 DIVERGING.set_bad("#c3c2b7")      # no data
@@ -71,7 +73,32 @@ def load(config_path):
         frame.drop(frame[frame["lag_min"].abs() > PLOT_MAX_LAG_MIN].index, inplace=True)
     done = f'{len(table):,} of {len(simulations):,} simulations have results'
     print(done)
-    return config, run_dir, table, curves.reset_index(drop=True), experiment, experiment_on, done
+    statistic = config["inputs"]["rate_statistic"]
+    fitted = read_rates(folder / config["inputs"]["rates_E"], statistic) + read_rates(folder / config["inputs"]["rates_G"], statistic)
+    return config, run_dir, table, curves.reset_index(drop=True), experiment, experiment_on, done, fitted
+
+
+def read_rates(path, statistic):
+    """The fitted R12, R21, R23, R32 and Initiate of one gene (rows of a rates_*.txt file: ml, mean, median, last)."""
+    lines = [line for line in Path(path).read_text().splitlines() if line.strip()]
+    try:
+        float(lines[0].split(",")[0])
+    except ValueError:
+        lines = lines[1:]                               # drop the header line
+    row = {"ml": 0, "mean": 1, "median": 2, "last": 3}[statistic]
+    return [float(value) for value in lines[row].split(",")[:len(RATES)]]
+
+
+def regulated_rates(sim):
+    """Which rates a model regulates, and which unit and state regulates each."""
+    hidden_states = ("H state 2", "H state 2") if sim["hidden"] == "H2" else ("H state 1", "H state 3")
+    regulated = []
+    for column, gene, source in [("GE_rates", "E", "G state 3"), ("HE_rates", "E", hidden_states[0]),
+                                 ("EG_rates", "G", "E state 3"), ("HG_rates", "G", hidden_states[1])]:
+        if pd.notna(sim[column]):
+            regulated += [dict(gene=gene, rate=rate, by=source, index=BASE_COLUMNS.index(f"base_{gene}_{rate}"))
+                          for rate in sim[column].split("+")]
+    return regulated
 
 
 def curve_matrix(curves, experiment, observable, pair):
@@ -269,7 +296,7 @@ def top_table(table, experiment_on):
                        f'ON MYC (exp. {experiment_on["on_MYC"]:.3f})'], rows)
 
 
-def explorer_data(table, curves, experiment):
+def explorer_data(table, curves, experiment, fitted):
     """Everything the interactive explorer needs, as one JSON object."""
     clean = lambda values: [None if v != v else round(float(v), 4) for v in values]
     matrices = [curve_matrix(curves, experiment, observable, pair) for observable, pair, _ in CURVES]
@@ -277,13 +304,15 @@ def explorer_data(table, curves, experiment):
     sims = [dict(id=int(sim["sim_id"]), model=sim["model_id"],
                  par={name: float(sim[name]) for name in PARAMETERS if pd.notna(sim[name])},
                  nrmse=clean(sim[f"nrmse_{observable}_{pair}"] for observable, pair, _ in CURVES),
+                 base=[float(f"{sim[column]:.4g}") for column in BASE_COLUMNS],
                  curves=[clean(values[i]) for values in per_curve])
             for i, (_, sim) in enumerate(table.iterrows())]
-    models = {model: dict(group=rows["group"].iloc[0], free=free_parameters(rows)) for model, rows in table.groupby("model_id", sort=False)}
+    models = {model: dict(group=rows["group"].iloc[0], free=free_parameters(rows), regulated=regulated_rates(rows.iloc[0]))
+              for model, rows in table.groupby("model_id", sort=False)}
     control = table.loc[table["group"] == "uncoupled", "sim_id"]
     return dict(curve_names=[name for _, _, name in CURVES], lags=clean(matrices[0][0].columns),
                 experiment=[clean(m[1]) for m in matrices], experiment_se=[clean(m[2]) for m in matrices],
-                models=models, sims=sims, control=int(control.iloc[0]) if len(control) else None)
+                models=models, sims=sims, control=int(control.iloc[0]) if len(control) else None, fitted=fitted)
 
 
 STYLE = """
@@ -357,6 +386,22 @@ function draw() {
   if (sims.length > 12) legend += item(shade(0), `${sims.length} simulations, ${vary} from ${sims[0].par[vary].toPrecision(3)} (light)`) + item(shade(1), `to ${sims[sims.length - 1].par[vary].toPrecision(3)} (dark)`);
   else sims.forEach((s, i) => { legend += item(shade(sims.length > 1 ? i / (sims.length - 1) : 0.6), `${vary ? vary + " " + s.par[vary] : "fold 1"} · simulation ${s.id} · NRMSE ${s.nrmse[curve] === null ? "n/a" : s.nrmse[curve].toFixed(3)}`); });
   $("legend").innerHTML = legend;
+  rateTable(sims, vary);
+}
+function rateTable(sims, vary) {                // the regulated rates of the drawn simulations
+  const regulated = DATA.models[$("model").value].regulated, f = v => v.toPrecision(3);
+  if (!regulated.length || sims.length > 12) { $("rates").innerHTML = regulated.length ? "<p class='sub'>The rate table is shown when 12 or fewer simulations are drawn.</p>" : ""; return; }
+  let rows = `<tr><th>Rate</th><th>Regulated by</th><th>Fitted (long-run average)</th>` +
+    sims.map(s => `<th>${vary ? vary + " " + s.par[vary] : "simulation " + s.id}: base → regulated (source active)</th>`).join("") + "</tr>";
+  for (const r of regulated) {
+    const fitted = DATA.fitted[r.index];
+    rows += `<tr><td>${r.gene === "E" ? "CCAT1" : "MYC"} ${r.rate}</td><td>${r.by}</td><td>${f(fitted)}</td>` + sims.map(s => {
+      const base = s.base[r.index], fold = s.par.fold;
+      return `<td>${f(base)} → ${f(base * fold)}` + (fold > 1 ? ` (${(100 * (fitted / base - 1) / (fold - 1)).toFixed(0)}% of the time)` : "") + "</td>";
+    }).join("") + "</tr>";
+  }
+  $("rates").innerHTML = `<table>${rows}</table><p class="sub">Rates per minute. Base = the rate while its source is inactive; regulated = base × fold.
+    The base is set so that the long-run average equals the fitted rate. All other rates equal their fitted values.</p>`;
 }
 options($("curve"), DATA.curve_names.map((_, i) => i), DATA.curve_names);
 options($("group"), groups);
@@ -366,8 +411,8 @@ $("curve").value = 1; $("group").value = groups[Math.min(1, groups.length - 1)];
 """
 
 
-def write_report(run_dir, config, done, table, curves, experiment, experiment_on, plots):
-    data = json.dumps(explorer_data(table, curves, experiment), separators=(",", ":")).replace("</", "<\\/")
+def write_report(run_dir, config, done, table, curves, experiment, experiment_on, fitted, plots):
+    data = json.dumps(explorer_data(table, curves, experiment, fitted), separators=(",", ":")).replace("</", "<\\/")
     figures = "".join(
         f'<section class="card"><figure><h3>{html.escape(title)}</h3><p class="sub">{html.escape(caption)} '
         f'<a href="plots/{stem}.pdf">PDF</a> · <a href="plots/{stem}.png">PNG</a></p>'
@@ -383,6 +428,7 @@ sweep mode: {config["sweep"]["mode"]} · score = {html.escape(SCORE_NAME)} (lowe
 <label>curve<select id="curve"></select></label><label>model group<select id="group"></select></label>
 <label>model<select id="model"></select></label><label>vary<select id="vary"></select></label><span id="fixed" class="controls" style="margin:0"></span></div>
 <svg id="chart" viewBox="0 0 900 380" role="img" aria-label="selected curves against experiment"></svg><div id="legend"></div>
+<div id="rates" class="scroll" style="margin-top:10px"></div>
 <p class="sub">Light to dark blue = increasing value of the varied parameter. If a model was sampled with many random
 parameter sets (extensive sweep), all of them are drawn and the other parameters are not held fixed.</p></section>
 
@@ -398,7 +444,7 @@ parameter sets (extensive sweep), all of them are drawn and the other parameters
 def main():
     if len(sys.argv) != 2:
         raise SystemExit(__doc__)
-    config, run_dir, table, curves, experiment, experiment_on, done = load(Path(sys.argv[1]).resolve())
+    config, run_dir, table, curves, experiment, experiment_on, done, fitted = load(Path(sys.argv[1]).resolve())
     table.sort_values("rank").to_csv(run_dir / "ranked_scores.csv", index=False)
     folder = run_dir / "plots"
     folder.mkdir(exist_ok=True)
@@ -420,7 +466,7 @@ def main():
              "Rows are simulations, grouped by model group, then model, then parameters. Top strip: experiment.")
     save(on_fraction_heatmap(table, experiment_on), "10_heatmap_on_fraction", "ON fraction relative to experiment",
          "Rows as in the curve heatmaps.")
-    write_report(run_dir, config, done, table, curves, experiment, experiment_on, plots)
+    write_report(run_dir, config, done, table, curves, experiment, experiment_on, fitted, plots)
     print(f"Wrote {run_dir / 'results_report.html'}, {folder}/ and {run_dir / 'ranked_scores.csv'}")
 
 
