@@ -17,14 +17,11 @@ GROUP_TEXT = {
     "E_to_G": "While CCAT1 (E) is in promoter state 3, the chosen rates of MYC (G) are multiplied by the fold.",
     "G_to_E": "While MYC (G) is in promoter state 3, the chosen rates of CCAT1 (E) are multiplied by the fold.",
     "reciprocal": "Both directions at once, with the same fold. Each direction has its own choice of rates.",
-    "H2_symmetric": "Two-state hidden unit with equal switching rates (h21 = h12). "
-                    "While it is in state 2, the chosen rates of both genes are multiplied by the fold.",
-    "H2_asymmetric": "Two-state hidden unit with independent switching rates. "
-                     "While it is in state 2, the chosen rates of both genes are multiplied by the fold.",
+    "H2": "Two-state hidden unit. While it is in state 2, the chosen rates of both genes are multiplied by the fold.",
     "H3_symmetric": "Three-state hidden unit, mirror-symmetric rates (h23 = h21, h32 = h12). "
-                    "State 1 multiplies the chosen rates of E, state 3 those of G; never both together.",
+                    "State 1 multiplies the chosen rates of E, state 3 those of G; state 2 regulates nothing.",
     "H3_asymmetric": "Three-state hidden unit with four independent rates. "
-                     "State 1 multiplies the chosen rates of E, state 3 those of G; never both together.",
+                     "State 1 multiplies the chosen rates of E, state 3 those of G; state 2 regulates nothing.",
 }
 
 # ---------------------------------------------------------------------------
@@ -80,7 +77,7 @@ def schematic(group):
     if group.startswith("H"):
         tied = group.endswith("_symmetric")
         if group.startswith("H2"):
-            drawing, xs = hidden_unit(2, [("h12", "h21 = h12" if tied else "h21")])
+            drawing, xs = hidden_unit(2, [("h12", "h21")])
             sources = (xs[1], xs[1])            # state 2 regulates both genes
         else:
             drawing, xs = hidden_unit(3, [("h12", "h21"), ("h23 = h21" if tied else "h23", "h32 = h12" if tied else "h32")])

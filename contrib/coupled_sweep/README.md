@@ -85,9 +85,8 @@ Each swarm job writes one `curves_` and one `metrics_` file, named by its first 
 | `E_to_G` | CCAT1 in promoter state 3 regulates MYC | fold |
 | `G_to_E` | MYC in promoter state 3 regulates CCAT1 | fold |
 | `reciprocal` | both, same fold | fold |
-| `H2_symmetric` | hidden state 2 regulates both genes; h21 = h12 | fold, h12 |
-| `H2_asymmetric` | same; independent h12, h21 | fold, h12, h21 |
-| `H3_symmetric` | hidden state 1 regulates CCAT1, state 3 regulates MYC; h23 = h21, h32 = h12 | fold, h12, h21 |
+| `H2` | hidden state 2 regulates both genes | fold, h12, h21 |
+| `H3_symmetric` | hidden state 1 regulates CCAT1, state 3 regulates MYC, state 2 nothing; h32 = h12, h23 = h21 | fold, h12, h21 |
 | `H3_asymmetric` | same; four independent rates | fold, h12, h21, h23, h32 |
 
 - Regulated rates: each model multiplies one of nine rate sets by the fold: R12, R21, R23, R32,

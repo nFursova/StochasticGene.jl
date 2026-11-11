@@ -23,11 +23,10 @@ RATE_SETS = ["R12", "R21", "R23", "R32", "Initiate",
 
 # Hidden-unit rates that each hidden group sweeps ("free") and the rates set equal to them ("tied").
 #   H2: two hidden states 1 <-> 2; state 2 regulates both genes.
-#   H3: three hidden states 1 <-> 2 <-> 3; state 1 regulates E, state 3 regulates G.
+#   H3: three hidden states 1 <-> 2 <-> 3; state 1 regulates E, state 3 regulates G, state 2 regulates nothing.
 HIDDEN_GROUPS = {
-    "H2_symmetric":  dict(hidden="H2", free=["h12"], tied={"h21": "h12"}),
-    "H2_asymmetric": dict(hidden="H2", free=["h12", "h21"], tied={}),
-    "H3_symmetric":  dict(hidden="H3", free=["h12", "h21"], tied={"h23": "h21", "h32": "h12"}),
+    "H2":            dict(hidden="H2", free=["h12", "h21"], tied={}),
+    "H3_symmetric":  dict(hidden="H3", free=["h12", "h21"], tied={"h23": "h21", "h32": "h12"}),   # R32 = R12, R23 = R21
     "H3_asymmetric": dict(hidden="H3", free=["h12", "h21", "h23", "h32"], tied={}),
 }
 HIDDEN_RATES = ["h12", "h21", "h23", "h32"]
