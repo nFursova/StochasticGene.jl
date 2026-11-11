@@ -5,20 +5,27 @@ E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit.
 | File | What it is |
 |---|---|
 | `config.toml` | The one file you edit: input files, sweep, simulation and swarm settings |
+| `0_experimental.R` | Computes the experimental curves and ON fractions from your predicted traces |
 | `1_generate_models.py` | Lists every model and every parameter set |
 | `2_model_report.py` | Draws the models and parameters as an HTML page, to check before simulating |
 | `3_run_simulations.jl` | Runs the simulations (either simulator) and writes the swarm file |
-| `4_plot_results.py` | Plots the results against experiment and ranks the simulations |
+| `4_plot_results.py` | Writes the results report (HTML), every plot as PDF and PNG, and the ranking |
 
-Needs Python 3.11+ with numpy, pandas and matplotlib, and Julia. StochasticGene is only needed for
-`simulator = "stochasticgene"`.
+Needs Python 3.11+ with numpy, pandas and matplotlib, Julia, and R for step 0. StochasticGene is only
+needed for `simulator = "stochasticgene"`.
 
 ## Steps
 
+**0. Compute the experimental data** (once). Arguments: your correlation R file, the CCAT1 and MYC
+predicted-trace files, the output folder, bootstrap replicates, epsilon, frame interval in minutes.
+
+```bash
+Rscript 0_experimental.R fcs_multitau_xcor_final.R CCAT1_predictedtraces.csv MYC_predictedtraces.csv data 200 1e-7 1.6666666666666667
+```
+
 **1. Edit `config.toml`.**
 
-- `[inputs]`: the two fitted-rate files, and `experimental.csv` and `experimental_metrics.csv` from
-  `experimental.R`.
+- `[inputs]`: the two fitted-rate files, and `experimental.csv` and `experimental_metrics.csv` from step 0.
 - `[output] run_dir`: the folder for this run.
 - `[sweep] mode`: `"grid"` or `"extensive"`.
 - `[simulation] simulator`: `"fast"` or `"stochasticgene"`.
@@ -54,7 +61,7 @@ julia 3_run_simulations.jl config.toml --swarm
 swarm -f runs/grid/simulations.swarm -t 12 -g 8 --time 08:00:00 --module julia --logdir runs/grid/swarm_logs
 ```
 
-**7. Plot and rank.** Open `<run_dir>/plots.pdf` and `<run_dir>/ranked_scores.csv`.
+**7. Report and rank.** Open `<run_dir>/results_report.html`.
 
 ```bash
 python3 4_plot_results.py config.toml
@@ -72,7 +79,8 @@ For the extensive sweep, set `mode = "extensive"` and a new `run_dir` in `config
 | `simulations.swarm` | step 5 | One line per job: 12 simulations, each with all its replicates, on 12 threads |
 | `results/curves_*.csv` | steps 4, 6 | The six correlation curves of every simulation: mean and SE over replicates |
 | `results/metrics_*.csv` | steps 4, 6 | One row per simulation: ON fractions, mean reporters, NRMSE and CCC of the six curves |
-| `plots.pdf` | step 7 | Heatmaps of every curve and of the ON fractions; line plots of the ten best simulations |
+| `results_report.html` | step 7 | Interactive explorer (pick a model, vary one parameter), summary tables, and every plot |
+| `plots/` | step 7 | Every plot as a PDF and a 600 dpi PNG |
 | `ranked_scores.csv` | step 7 | Every simulation with parameters, metrics and score, best first |
 
 Each swarm job writes one `curves_` and one `metrics_` file, named by its first and last simulation.
