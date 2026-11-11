@@ -7,7 +7,10 @@ rates_G = "data/rates_3Prime-5Prime-h2-3301none-gene-3Prime.txt"       # MYC (ge
 rate_statistic = "median"                                # row of the rates files: ml, mean, median or last
 experimental_curves = "data/experimental.csv"            # from experimental.R: observable, pair, lag_frames, lag_min, mean, se
 experimental_metrics = "data/experimental_metrics.csv"   # from experimental.R: metric, mean, se
-trace_lengths = ""                                       # optional experimental_lengths.csv; "" = every trace has nframes frames
+trace_lengths = ""                                       # "" = every simulated trace has nframes frames (see [simulation]).
+                                                         # Or the path of experimental_lengths.csv from step 0: then each
+                                                         # simulated trace gets the length of one experimental trace, and
+                                                         # ntraces and nframes below are ignored. A file path, not a number.
 
 [output]
 run_dir = "runs/grid"                # everything is written here

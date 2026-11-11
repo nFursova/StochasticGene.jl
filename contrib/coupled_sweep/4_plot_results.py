@@ -101,10 +101,11 @@ def regulated_rates(sim):
     return regulated
 
 
-def curve_matrix(curves, experiment, observable, pair):
-    """One curve for every simulation (rows = sim_id, columns = lag in minutes) and the experiment on the same lags."""
+def curve_matrix(curves, experiment, observable, pair, column="mean"):
+    """One curve for every simulation (rows = sim_id, columns = lag in minutes) and the experiment on the same lags.
+    column: "mean" (over the replicates of a simulation) or "se" (standard error over the replicates)."""
     select = lambda frame: frame[(frame["observable"] == observable) & (frame["pair"] == pair)]
-    values = select(curves).pivot(index="sim_id", columns="lag_min", values="mean")
+    values = select(curves).pivot(index="sim_id", columns="lag_min", values=column)
     frames = select(curves).drop_duplicates("lag_min").set_index("lag_min")["lag_frames"].reindex(values.columns)
     target = select(experiment).set_index("lag_frames").reindex(frames.to_numpy())
     return values, target["mean"].to_numpy(), target["se"].to_numpy()
@@ -301,11 +302,13 @@ def explorer_data(table, curves, experiment, fitted):
     clean = lambda values: [None if v != v else round(float(v), 4) for v in values]
     matrices = [curve_matrix(curves, experiment, observable, pair) for observable, pair, _ in CURVES]
     per_curve = [m[0].reindex(table["sim_id"]).to_numpy() for m in matrices]
+    per_curve_se = [curve_matrix(curves, experiment, observable, pair, "se")[0].reindex(table["sim_id"]).to_numpy()
+                    for observable, pair, _ in CURVES]
     sims = [dict(id=int(sim["sim_id"]), model=sim["model_id"],
                  par={name: float(sim[name]) for name in PARAMETERS if pd.notna(sim[name])},
                  nrmse=clean(sim[f"nrmse_{observable}_{pair}"] for observable, pair, _ in CURVES),
                  base=[float(f"{sim[column]:.4g}") for column in BASE_COLUMNS],
-                 curves=[clean(values[i]) for values in per_curve])
+                 curves=[clean(values[i]) for values in per_curve], se=[clean(values[i]) for values in per_curve_se])
             for i, (_, sim) in enumerate(table.iterrows())]
     models = {model: dict(group=rows["group"].iloc[0], free=free_parameters(rows), regulated=regulated_rates(rows.iloc[0]))
               for model, rows in table.groupby("model_id", sort=False)}
@@ -366,6 +369,7 @@ function draw() {
   const control = DATA.sims.find(s => s.id === DATA.control);
   const all = [...target.map((v, i) => v + (se[i] || 0)), ...target.map((v, i) => v - (se[i] || 0)), 0,
                ...sims.flatMap(s => s.curves[curve]), ...(control ? control.curves[curve] : [])].filter(v => v !== null);
+  const few = sims.length <= 12;                // few simulations: draw each one's mean ± SE over its replicates
   let lo = Math.min(...all), hi = Math.max(...all); const pad = (hi - lo || 1) * 0.06; lo -= pad; hi += pad;
   const W = 900, H = 380, L = 56, R = 12, T = 10, B = 40;
   const x = t => L + (W - L - R) * (t - lags[0]) / (lags[lags.length - 1] - lags[0]), y = v => T + (H - T - B) * (hi - v) / (hi - lo);
@@ -375,8 +379,10 @@ function draw() {
   for (const t of [-120, -90, -60, -30, 0, 30, 60, 90, 120].filter(t => t >= lags[0] && t <= lags[lags.length - 1]))
     svg += `<text x="${x(t)}" y="${H - B + 16}" text-anchor="middle">${t}</text>`;
   svg += `<text x="${(L + W - R) / 2}" y="${H - 6}" text-anchor="middle">lag (min)</text>`;
-  const band = target.map((v, i) => `${x(lags[i])},${y(v + (se[i] || 0))}`).concat(target.map((v, i) => `${x(lags[i])},${y(v - (se[i] || 0))}`).reverse());
-  svg += `<polygon points="${band.join(" ")}" fill="var(--ink)" opacity="0.12"/>`;
+  const band = (mean, se, color, opacity) => `<polygon points="${mean.map((v, i) => `${x(lags[i])},${y(v + (se[i] || 0))}`)
+    .concat(mean.map((v, i) => `${x(lags[i])},${y(v - (se[i] || 0))}`).reverse()).join(" ")}" fill="${color}" opacity="${opacity}"/>`;
+  svg += band(target, se, "var(--ink)", 0.12);
+  if (few) sims.forEach((s, i) => { svg += band(s.curves[curve], s.se[curve], shade(sims.length > 1 ? i / (sims.length - 1) : 0.6), 0.16); });
   if (control) svg += `<polyline points="${path(control.curves[curve])}" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="5 4"/>`;
   sims.forEach((s, i) => { svg += `<polyline points="${path(s.curves[curve])}" fill="none" stroke="${shade(sims.length > 1 ? i / (sims.length - 1) : 0.6)}" stroke-width="${sims.length > 12 ? 1 : 2}"/>`; });
   svg += `<polyline points="${path(target)}" fill="none" stroke="var(--ink)" stroke-width="2.4"/>`;
@@ -429,7 +435,8 @@ sweep mode: {config["sweep"]["mode"]} · score = {html.escape(SCORE_NAME)} (lowe
 <label>model<select id="model"></select></label><label>vary<select id="vary"></select></label><span id="fixed" class="controls" style="margin:0"></span></div>
 <svg id="chart" viewBox="0 0 900 380" role="img" aria-label="selected curves against experiment"></svg><div id="legend"></div>
 <div id="rates" class="scroll" style="margin-top:10px"></div>
-<p class="sub">Light to dark blue = increasing value of the varied parameter. If a model was sampled with many random
+<p class="sub">Every simulation curve is the mean of its replicate datasets; the band is ± SE over the replicates (drawn when
+12 or fewer simulations are shown). Light to dark blue = increasing value of the varied parameter. If a model was sampled with many random
 parameter sets (extensive sweep), all of them are drawn and the other parameters are not held fixed.</p></section>
 
 <h2>Summary by model group</h2><section class="card">{group_summary(table)}</section>
@@ -463,7 +470,8 @@ def main():
          "One point per simulation; the black line joins the medians.")
     for number, (observable, pair, name) in enumerate(CURVES, start=4):
         save(curve_heatmap(table, curves, experiment, observable, pair, name), f"{number:02d}_heatmap_{pair}_{observable}", name,
-             "Rows are simulations, grouped by model group, then model, then parameters. Top strip: experiment.")
+             "Each row is one simulation (the mean of its replicate datasets), grouped by model group, then model, "
+             "then parameters. Top strip: experiment.")
     save(on_fraction_heatmap(table, experiment_on), "10_heatmap_on_fraction", "ON fraction relative to experiment",
          "Rows as in the curve heatmaps.")
     write_report(run_dir, config, done, table, curves, experiment, experiment_on, fitted, plots)
