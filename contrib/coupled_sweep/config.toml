@@ -32,6 +32,10 @@ replicates = 3                       # independent datasets per simulation
 ntraces = 137                        # traces per dataset
 nframes = 216                        # frames per trace
 interval_min = 1.6666666666666667    # minutes between frames
+rate_matching = "time_average"       # how base rates are set so that a coupled rate still averages to its fitted value:
+                                     # "time_average":  averaged over all time (as in the original sweep)
+                                     # "state_average": averaged over the time when the gene is in the state where that
+                                     #                  rate can act; keeps ON fractions close to the uncoupled fit
 warmup_timescales = 3.0              # stochasticgene only: burn-in = this / slowest rate
 epsilon = 1e-7                       # added to traces before correlating, as in experimental.R
 score_max_lag_min = 90.0             # NRMSE and CCC use lags within +/- this many minutes

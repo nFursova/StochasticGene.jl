@@ -303,7 +303,7 @@ def top_table(table, experiment_on):
                        f'ON MYC (exp. {experiment_on["on_MYC"]:.3f})'], rows)
 
 
-def explorer_data(table, curves, experiment, fitted):
+def explorer_data(table, curves, experiment, fitted, matching):
     """Everything the interactive explorer needs, as one JSON object."""
     clean = lambda values: [None if v != v else round(float(v), 4) for v in values]
     matrices = [curve_matrix(curves, experiment, observable, pair) for observable, pair, _ in CURVES]
@@ -321,7 +321,8 @@ def explorer_data(table, curves, experiment, fitted):
     control = table.loc[table["group"] == "uncoupled", "sim_id"]
     return dict(curve_names=[name for _, _, name in CURVES], lags=clean(matrices[0][0].columns),
                 experiment=[clean(m[1]) for m in matrices], experiment_se=[clean(m[2]) for m in matrices],
-                models=models, sims=sims, control=int(control.iloc[0]) if len(control) else None, fitted=fitted)
+                models=models, sims=sims, control=int(control.iloc[0]) if len(control) else None, fitted=fitted,
+                state_average=matching == "state_average")
 
 
 STYLE = """
@@ -408,7 +409,7 @@ function draw() {
 function rateTable(sims, vary) {                // the regulated rates of the drawn simulations
   const regulated = DATA.models[$("model").value].regulated, f = v => v.toPrecision(3);
   if (!regulated.length || sims.length > 12) { $("rates").innerHTML = regulated.length ? "<p class='sub'>The rate table is shown when 12 or fewer simulations are drawn.</p>" : ""; return; }
-  let rows = `<tr><th>Rate</th><th>Regulated by</th><th>Fitted (long-run average)</th>` +
+  let rows = `<tr><th>Rate</th><th>Regulated by</th><th>Fitted (average)</th>` +
     sims.map(s => `<th>${vary ? vary + " " + s.par[vary] : "simulation " + s.id}: base → regulated (source active)</th>`).join("") + "</tr>";
   for (const r of regulated) {
     const fitted = DATA.fitted[r.index];
@@ -419,7 +420,8 @@ function rateTable(sims, vary) {                // the regulated rates of the dr
     }).join("") + "</tr>";
   }
   $("rates").innerHTML = `<table>${rows}</table><p class="sub">Rates per minute. Base = the rate while its source is inactive; regulated = base × fold. For source state R every occupied reporter position of the source gene adds (fold − 1) × base.
-    The base is set so that the long-run average equals the fitted rate. All other rates equal their fitted values.</p>`;
+    ${DATA.state_average ? "The base is set so that the average rate, over the time when the gene is in the state where that rate can act, equals the fitted rate; the source activity shown is over that time too."
+      : "The base is set so that the average over all time equals the fitted rate."} All other rates equal their fitted values.</p>`;
 }
 for (const s of DATA.sims) {                   // mean and SE over the replicates, for every curve and lag
   const stats = s.reps.map(reps => reps[0].map((_, i) => {
@@ -437,7 +439,8 @@ $("curve").value = 1; $("group").value = groups[Math.min(1, groups.length - 1)];
 
 
 def write_report(run_dir, config, done, table, curves, experiment, experiment_on, fitted, plots):
-    data = json.dumps(explorer_data(table, curves, experiment, fitted), separators=(",", ":")).replace("</", "<\\/")
+    matching = config["simulation"].get("rate_matching", "time_average")
+    data = json.dumps(explorer_data(table, curves, experiment, fitted, matching), separators=(",", ":")).replace("</", "<\\/")
     figures = "".join(
         f'<section class="card"><figure><h3>{html.escape(title)}</h3><p class="sub">{html.escape(caption)} '
         f'<a href="plots/{stem}.pdf">PDF</a> · <a href="plots/{stem}.png">PNG</a></p>'
@@ -446,7 +449,7 @@ def write_report(run_dir, config, done, table, curves, experiment, experiment_on
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Coupled-model sweep results</title><style>{STYLE}</style></head>
 <body><main><h1>Coupled-model sweep: results</h1>
 <p class="sub">{done} · {config["simulation"]["replicates"]} replicate datasets each · simulator: {config["simulation"]["simulator"]} ·
-sweep mode: {config["sweep"]["mode"]} · score = {html.escape(SCORE_NAME)} (lower is better) · lags within ±{PLOT_MAX_LAG_MIN} min shown.</p>
+sweep mode: {config["sweep"]["mode"]} · rate matching: {config["simulation"].get("rate_matching", "time_average")} · score = {html.escape(SCORE_NAME)} (lower is better) · lags within ±{PLOT_MAX_LAG_MIN} min shown.</p>
 
 <h2>Explore: how a parameter changes the curves</h2>
 <section class="card"><div class="controls">

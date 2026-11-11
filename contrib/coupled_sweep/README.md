@@ -103,8 +103,10 @@ Each swarm job writes one `curves_` and one `metrics_` file, named by its first 
 - Source state R is StochasticGene's `Rsum`: every occupied reporter position of the source gene adds one
   coupling effect, so the rate is multiplied by 1 + (fold − 1) × (number of occupied positions).
 - Controls: every group also has one model with fold 1 (gamma = 0).
-- Rate matching: base rates are rescaled so that each regulated rate's long-run average equals its
-  fitted value, as `rate_reference = "time_average"` did in the original sweep.
+- Rate matching (`[simulation] rate_matching`): base rates are rescaled so that each regulated rate still
+  averages to its fitted value. `"time_average"` averages over all time, as in the original sweep; coupling
+  can then still shift a gene's ON fraction. `"state_average"` averages over the time when the gene is in
+  the state where that rate can act, which keeps ON fractions close to the uncoupled fit.
 - `grid`: every combination of the listed fold and hidden-rate values.
 - `extensive`: 100 random combinations per model. Each parameter takes 100 log-spaced values over
   the same range, each used once.

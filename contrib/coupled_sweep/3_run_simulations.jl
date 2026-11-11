@@ -66,6 +66,7 @@ function read_config(path)
        fitted,                                   # 2 x 9 fitted rates: row 1 = E, row 2 = G
        lengths, ntraces=length(lengths), nframes=maximum(lengths), targets,
        simulator=sim["simulator"], replicates=sim["replicates"], interval=sim["interval_min"],
+       rate_matching=get(sim, "rate_matching", "time_average"),
        warmup_timescales=sim["warmup_timescales"], epsilon=sim["epsilon"],
        max_lag=sim["score_max_lag_min"], seed=sim["seed"], swarm=config["swarm"])
 end
@@ -167,14 +168,25 @@ function stationary(destinations, rates)
     prob ./ sum(prob)
 end
 
+"Can rate k of gene u act in this state? A promoter transition needs its starting promoter state;
+initiation needs promoter state 3 and an empty first reporter position."
+function possible(p, bits_E, bits_G, u, k)
+    state = pstate(p)[u]
+    k <= 4 && return state == GENE_TRANSITIONS[k][1]
+    state == 3 && (u == 1 ? bits_E : bits_G) & 1 == 0
+end
+
 """
-Base rates that keep every regulated rate's long-run average equal to its fitted value, as
-`rate_reference = "time_average"` did in simulate_shared_hidden_sweep.jl: base = fitted / (1 + gamma * a),
-where a is the long-run average number of active coupling effects (the fraction of time the source is in its
-regulating state). With a gene as source, a can depend on the coupling itself, so the base rates are solved
-with Newton's method.
+Base rates that keep every regulated rate's average equal to its fitted value: base = fitted / (1 + gamma * a),
+where a is the average number of active coupling effects. `matching` chooses which average:
+- "time_average": over all time, as `rate_reference = "time_average"` did in simulate_shared_hidden_sweep.jl.
+  Coupling can then still shift a gene's ON fraction.
+- "state_average": only over the time when the gene is in the state where that rate can act. This keeps each
+  gene's promoter-state occupancies equal to those of the uncoupled fit.
+The average depends on the coupling itself, so the base rates are solved with Newton's method.
 """
-function base_rates(model, fitted)
+function base_rates(model, fitted, matching)
+    matching in ("time_average", "state_average") || error("rate_matching must be time_average or state_average")
     regulated = unique([(edge.target, edge.rate) for edge in model.edges])
     # log(average / fitted) of every regulated rate, for log base rates x
     function mismatch(x)
@@ -183,7 +195,9 @@ function base_rates(model, fitted)
             base[u, k] = exp(value)
         end
         prob = stationary(system_transitions(model, base)...)
-        average(u, k) = base[u, k] * sum(prob[s] * factor(model, sstate(model, s)..., u, k) for s in eachindex(prob))
+        counts(s, u, k) = matching == "time_average" || possible(sstate(model, s)..., u, k)     # is state s averaged over?
+        average(u, k) = base[u, k] * sum(prob[s] * factor(model, sstate(model, s)..., u, k) for s in eachindex(prob) if counts(s, u, k)) /
+                        sum(prob[s] for s in eachindex(prob) if counts(s, u, k))
         [log(average(u, k) / fitted[u, k]) for (u, k) in regulated], base
     end
     x = [log(fitted[u, k]) for (u, k) in regulated]
@@ -204,7 +218,7 @@ function base_rates(model, fitted)
 end
 
 "Build the model of one simulations.csv row."
-function build_model(row, fitted)
+function build_model(row, fitted, matching)
     nh = row["hidden"] == "none" ? 1 : row["hidden"] == "H2" ? 2 : 3
     edges = Edge[]
     function connect(column, source, state, target)
@@ -219,7 +233,7 @@ function build_model(row, fitted)
     connect("HG_rates", 3, nh == 2 ? 2 : 3, 2)        # H3: hidden state 1 regulates E, state 3 regulates G
     hidden_rates = Float64[parse(Float64, row[name]) for name in ("h12", "h21", "h23", "h32")[1:2*(nh-1)]]
     model = Model(row["model_id"], nh, hidden_rates, edges, parse(Float64, row["fold"]) - 1, copy(fitted))
-    model.base .= base_rates(model, fitted)
+    model.base .= base_rates(model, fitted, matching)
     model
 end
 
@@ -493,7 +507,7 @@ mean_se(values) = (mean(values), std(values) / sqrt(length(values)))
 
 "Simulate rows first_id to last_id of simulations.csv and write their curves and metrics."
 function run_simulations(rows, cfg, first_id, last_id)
-    models = [build_model(row, cfg.fitted) for row in rows]
+    models = [build_model(row, cfg.fitted, cfg.rate_matching) for row in rows]
     jobs = [(i, replicate) for i in eachindex(rows) for replicate in 1:cfg.replicates]
     results = Vector{Any}(undef, length(jobs))
     Threads.@threads :dynamic for j in eachindex(jobs)
