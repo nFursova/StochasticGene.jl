@@ -7,11 +7,13 @@ Reads <run_dir>/simulations.csv and <run_dir>/results/, and writes into <run_dir
     results_report.html   the report: an interactive explorer (choose a model, vary one parameter, see the
                           curves change), summary tables, and every plot below
     plots/                every plot as a PDF and as a 600 dpi PNG
+    explorer/             the data the report's explorer loads when you pick a model (one small file per model)
     ranked_scores.csv     every simulation with its parameters, metrics and score, best first
 
 Heatmap rows are simulations, grouped by model group, then model, then parameters.
 """
-import html, json, sys, tomllib
+import html, json, os, sys, tomllib
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -23,7 +25,6 @@ from matplotlib.colors import LinearSegmentedColormap
 PLOT_MAX_LAG_MIN = 120      # lag range shown in every plot
 TOP_N = 10                  # number of best simulations shown as line plots and in the table
 PNG_DPI = 600
-SHOW_REPLICATES = True      # also draw every replicate as a thin line in the top-simulation plots
 
 SCORE_NAME = "NRMSE of the reporter-count cross-correlation"
 
@@ -57,26 +58,64 @@ DIVERGING.set_bad("#c3c2b7")      # no data
 # Data
 # ---------------------------------------------------------------------------
 
+class Curves:
+    """All correlation curves in one array: values[simulation, row within a simulation, column].
+
+    Every simulation has the same rows (observable, pair, lag), listed in `layout`. `columns` names the last axis:
+    mean, se, rep1, rep2, ... `position` gives the index of a sim_id along the first axis.
+    A simulation that is in more than one file (a test run and the swarm, say) is taken from the newest file."""
+
+    def __init__(self, files):
+        first = pd.read_csv(files[0])
+        block = int((first["sim_id"] == first["sim_id"].iloc[0]).sum())           # rows per simulation
+        self.layout = first.iloc[:block][["observable", "pair", "lag_frames", "lag_min"]].reset_index(drop=True)
+        self.columns = [c for c in first.columns if c in ("mean", "se") or c.startswith("rep")]
+        cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+        with ProcessPoolExecutor(max_workers=cores) as pool:                       # read the files in parallel
+            parts = list(pool.map(read_curve_file, files, [block] * len(files), [self.columns] * len(files)))
+        ids = np.concatenate([part[0] for part in parts])
+        keep = ~pd.Index(ids).duplicated(keep="last")                              # files are ordered oldest to newest
+        self.values = np.concatenate([part[1] for part in parts])[keep]
+        self.position = pd.Series(np.arange(keep.sum()), index=ids[keep])
+
+    def rows(self, observable, pair):
+        """Row numbers and lags (in frames and in minutes) of one curve, within the plotted lag range."""
+        layout = self.layout
+        part = layout[(layout["observable"] == observable) & (layout["pair"] == pair) &
+                      (layout["lag_min"].abs() <= PLOT_MAX_LAG_MIN)].sort_values("lag_min")
+        return part.index.to_numpy(), part["lag_frames"].to_numpy(), part["lag_min"].to_numpy()
+
+
+def read_curve_file(path, block, columns):
+    """The sim_ids of one curves file and its numbers as an array [simulation, row, column]."""
+    frame = pd.read_csv(path, usecols=["sim_id"] + columns)
+    return frame["sim_id"].to_numpy()[::block], frame[columns].to_numpy(dtype=np.float32).reshape(-1, block, len(columns))
+
+
 def load(config_path):
     config = tomllib.loads(config_path.read_text())
     folder = config_path.parent
     run_dir = folder / config["output"]["run_dir"]
-    read_all = lambda pattern: pd.concat([pd.read_csv(f) for f in sorted((run_dir / "results").glob(pattern))])
-    simulations = pd.read_csv(run_dir / "simulations.csv", dtype={"EG_state": str, "GE_state": str})
-    metrics, curves = read_all("metrics_*.csv"), read_all("curves_*.csv")
+    simulations = pd.read_csv(run_dir / "simulations.csv", dtype={"EG_state": str, "GE_state": str}, low_memory=False)
+    oldest_first = lambda pattern: sorted((run_dir / "results").glob(pattern), key=lambda f: f.stat().st_mtime)
+    metrics = pd.concat([pd.read_csv(f) for f in oldest_first("metrics_*.csv")])
+    repeated = int(metrics["sim_id"].duplicated().sum())
+    if repeated:
+        print(f"{repeated:,} simulations are in more than one results file; the newest file is used for each")
+    metrics = metrics.drop_duplicates("sim_id", keep="last")
+    curves = Curves(oldest_first("curves_*.csv"))
     experiment = pd.read_csv(folder / config["inputs"]["experimental_curves"])
     experiment_on = pd.read_csv(folder / config["inputs"]["experimental_metrics"]).set_index("metric")["mean"]
-    # One row per simulation: parameters, metrics, score and rank (1 = best).
-    table = simulations.merge(metrics, on=["sim_id", "model_id"]).sort_values("sim_id")
+    # One row per simulation: parameters, metrics, score, rank (1 = best) and where its curves are in `curves`.
+    table = simulations.merge(metrics, on=["sim_id", "model_id"]).sort_values("sim_id").reset_index(drop=True)
     table["score"] = score(table)
     table["rank"] = table["score"].rank(method="first").astype("Int64")
-    for frame in (curves, experiment):
-        frame.drop(frame[frame["lag_min"].abs() > PLOT_MAX_LAG_MIN].index, inplace=True)
+    table["curve_row"] = curves.position.reindex(table["sim_id"]).to_numpy()
     done = f'{len(table):,} of {len(simulations):,} simulations have results'
     print(done)
     statistic = config["inputs"]["rate_statistic"]
     fitted = read_rates(folder / config["inputs"]["rates_E"], statistic) + read_rates(folder / config["inputs"]["rates_G"], statistic)
-    return config, run_dir, table, curves.reset_index(drop=True), experiment, experiment_on, done, fitted
+    return config, run_dir, table, curves, experiment, experiment_on, done, fitted
 
 
 def read_rates(path, statistic):
@@ -102,14 +141,11 @@ def regulated_rates(sim):
     return regulated
 
 
-def curve_matrix(curves, experiment, observable, pair, column="mean"):
-    """One curve for every simulation (rows = sim_id, columns = lag in minutes) and the experiment on the same lags.
-    column: "mean" (over the replicates of a simulation) or "se" (standard error over the replicates)."""
-    select = lambda frame: frame[(frame["observable"] == observable) & (frame["pair"] == pair)]
-    values = select(curves).pivot(index="sim_id", columns="lag_min", values=column)
-    frames = select(curves).drop_duplicates("lag_min").set_index("lag_min")["lag_frames"].reindex(values.columns)
-    target = select(experiment).set_index("lag_frames").reindex(frames.to_numpy())
-    return values, target["mean"].to_numpy(), target["se"].to_numpy()
+def experiment_curve(experiment, observable, pair, lag_frames):
+    """Experimental mean and SE of one curve on the given lags (NaN where the experiment has no value)."""
+    part = experiment[(experiment["observable"] == observable) & (experiment["pair"] == pair)]
+    part = part.set_index("lag_frames").reindex(lag_frames)
+    return part["mean"].to_numpy(), part["se"].to_numpy()
 
 
 def free_parameters(rows):
@@ -135,19 +171,21 @@ def bin_edges(centers):
 
 
 def heatmap(title, table, values, x_edges, limit, colorbar_label, top_row=None, x_label="", x_ticks=None):
-    """A panel per model group, rows = that group's simulations in sim_id order; top_row = experiment."""
+    """A panel per model group, rows = that group's simulations in sim_id order; top_row = experiment.
+    values: array [simulation, heatmap column], in the order of `table`."""
     groups = list(dict.fromkeys(table["group"]))
     heights = ([0.35] if top_row is not None else []) + [1] * len(groups)
     figure, axes = plt.subplots(len(heights), 1, figsize=(7.5, 9.5), gridspec_kw=dict(height_ratios=heights, hspace=0.12),
                                 squeeze=False)
     axes = list(axes[:, 0])
-    style = dict(cmap=DIVERGING, vmin=-limit, vmax=limit, rasterized=True)
+    style = dict(cmap=DIVERGING, vmin=-limit, vmax=limit)
     if top_row is not None:
-        mesh = axes[0].pcolormesh(x_edges, [0, 1], top_row[None, :], **style)
+        mesh = axes[0].pcolorfast(x_edges, [0, 1], np.ma.masked_invalid(top_row[None, :]), **style)
         axes[0].set_ylabel("experiment", rotation=0, ha="right", va="center", fontweight="bold")
     for axis, group in zip(axes[len(heights) - len(groups):], groups):
         rows = table[table["group"] == group]
-        mesh = axis.pcolormesh(x_edges, np.arange(len(rows) + 1), values.reindex(rows["sim_id"]).to_numpy(), **style)
+        block = values[(table["group"] == group).to_numpy()]
+        mesh = axis.pcolorfast(x_edges, np.arange(len(rows) + 1), np.ma.masked_invalid(block), **style)
         axis.invert_yaxis()                                     # first simulation of the group on top
         models = rows["model_id"].to_numpy()
         boundaries = np.flatnonzero(models[1:] != models[:-1]) + 1
@@ -169,17 +207,17 @@ def heatmap(title, table, values, x_edges, limit, colorbar_label, top_row=None, 
 
 
 def curve_heatmap(table, curves, experiment, observable, pair, name):
-    values, target, _ = curve_matrix(curves, experiment, observable, pair)
+    rows, lag_frames, lags = curves.rows(observable, pair)
+    values = curves.values[table["curve_row"].to_numpy()[:, None], rows[None, :], 0]      # mean curve of every simulation
+    target, _ = experiment_curve(experiment, observable, pair, lag_frames)
     limit = 2 * np.nanmax(np.abs(target))        # colour scale set by the experiment; stronger simulations saturate
-    return heatmap(name, table, values, bin_edges(values.columns.to_numpy()), limit,
-                   "correlation (blue negative, red positive)", top_row=target,
+    return heatmap(name, table, values, bin_edges(lags), limit, "correlation (blue negative, red positive)", top_row=target,
                    x_label="lag (min); positive = MYC after CCAT1" if pair == "EG" else "lag (min)")
 
 
 def on_fraction_heatmap(table, experiment_on):
-    ratio = pd.DataFrame({"E": np.log2(table["on_E"] / experiment_on["on_CCAT1"]),
-                          "G": np.log2(table["on_G"] / experiment_on["on_MYC"])}).set_index(table["sim_id"])
-    limit = max(1.0, np.nanpercentile(np.abs(ratio.to_numpy()), 99))
+    ratio = np.column_stack([np.log2(table["on_E"] / experiment_on["on_CCAT1"]), np.log2(table["on_G"] / experiment_on["on_MYC"])])
+    limit = max(1.0, np.nanpercentile(np.abs(ratio), 99))
     title = (f'ON fraction relative to experiment (experiment: CCAT1 {experiment_on["on_CCAT1"]:.3f}, '
              f'MYC {experiment_on["on_MYC"]:.3f})')
     return heatmap(title, table, ratio, np.array([0.0, 1.0, 2.0]), limit,
@@ -190,7 +228,7 @@ def on_fraction_heatmap(table, experiment_on):
 def top_curves(table, curves, experiment, experiment_on):
     """The TOP_N best simulations: every curve against experiment and the uncoupled control, one row per simulation."""
     best = table.sort_values("rank").head(TOP_N)
-    control = table.loc[table["group"] == "uncoupled", "sim_id"]
+    control = table.loc[table["group"] == "uncoupled", "curve_row"]
     figure, axes = plt.subplots(len(best), len(CURVES), figsize=(15, 1.25 * len(best) + 1.4), sharex=True, sharey="col",
                                 squeeze=False)
     for row, (_, sim) in enumerate(best.iterrows()):
@@ -200,20 +238,16 @@ def top_curves(table, curves, experiment, experiment_on):
         axes[row, 0].set_ylabel(label, rotation=0, ha="right", va="center", fontsize=6.5)
         for column, (observable, pair, name) in enumerate(CURVES):
             axis = axes[row, column]
-            select = lambda frame: frame[(frame["observable"] == observable) & (frame["pair"] == pair)].sort_values("lag_min")
+            rows, lag_frames, lags = curves.rows(observable, pair)
+            simulated = curves.values[sim["curve_row"], rows, :]            # [lag, column]: mean, se, rep1, rep2, ...
             if len(control):
-                data = select(curves[curves["sim_id"] == control.iloc[0]])
-                axis.plot(data["lag_min"], data["mean"], color=MUTED, linewidth=0.9, linestyle="--", label="uncoupled control")
-            if SHOW_REPLICATES:
-                data = select(curves[curves["sim_id"] == sim["sim_id"]])
-                for k, replicate in enumerate(c for c in curves.columns if c.startswith("rep")):
-                    axis.plot(data["lag_min"], data[replicate], color=BLUE, linewidth=0.5, alpha=0.55,
-                              label="individual replicates" if k == 0 else None)
-            for data, color, text in [(select(experiment), INK, "experiment ± SE"),
-                                      (select(curves[curves["sim_id"] == sim["sim_id"]]), BLUE, "simulation mean ± SE over replicates")]:
-                axis.fill_between(data["lag_min"], data["mean"] - data["se"], data["mean"] + data["se"],
-                                  color=color, alpha=0.18, linewidth=0)
-                axis.plot(data["lag_min"], data["mean"], color=color, linewidth=1.3, label=text)
+                axis.plot(lags, curves.values[control.iloc[0], rows, 0], color=MUTED, linewidth=0.9, linestyle="--",
+                          label="uncoupled control")
+            target, target_se = experiment_curve(experiment, observable, pair, lag_frames)
+            for mean, se, color, text in [(target, target_se, INK, "experiment ± SE"),
+                                          (simulated[:, 0], simulated[:, 1], BLUE, "simulation mean ± SE over replicates")]:
+                axis.fill_between(lags, mean - se, mean + se, color=color, alpha=0.18, linewidth=0)
+                axis.plot(lags, mean, color=color, linewidth=1.3, label=text)
             axis.axhline(0, color=MUTED, linewidth=0.5)
             axis.tick_params(labelsize=6.5, colors=MUTED, labelcolor=INK)
             for side in ("top", "right"):
@@ -223,7 +257,7 @@ def top_curves(table, curves, experiment, experiment_on):
             if row == len(best) - 1:
                 axis.set_xlabel("lag (min)", fontsize=7.5)
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    figure.legend(handles, labels, loc="upper right", ncol=4, frameon=False, fontsize=8)
+    figure.legend(handles, labels, loc="upper right", ncol=3, frameon=False, fontsize=8)
     figure.suptitle(f"The {len(best)} best simulations (lowest score)", x=0.02, ha="left", fontsize=11, fontweight="bold")
     height = figure.get_figheight()
     figure.subplots_adjust(left=0.2, right=0.99, top=1 - 0.8 / height, bottom=0.5 / height, wspace=0.24, hspace=0.28)
@@ -303,25 +337,40 @@ def top_table(table, experiment_on):
                        f'ON MYC (exp. {experiment_on["on_MYC"]:.3f})'], rows)
 
 
-def explorer_data(table, curves, experiment, fitted, matching):
-    """Everything the interactive explorer needs, as one JSON object."""
-    clean = lambda values: [None if v != v else round(float(v), 4) for v in values]
-    matrices = [curve_matrix(curves, experiment, observable, pair) for observable, pair, _ in CURVES]
-    # Every replicate of every curve; the page computes mean and SE from them.
-    replicates = [[curve_matrix(curves, experiment, observable, pair, column)[0].reindex(table["sim_id"]).to_numpy()
-                   for column in curves.columns if column.startswith("rep")] for observable, pair, _ in CURVES]
-    sims = [dict(id=int(sim["sim_id"]), model=sim["model_id"],
-                 par={name: float(sim[name]) for name in PARAMETERS if pd.notna(sim[name])},
-                 nrmse=clean(sim[f"nrmse_{observable}_{pair}"] for observable, pair, _ in CURVES),
-                 base=[float(f"{sim[column]:.4g}") for column in BASE_COLUMNS],
-                 reps=[[clean(values[i]) for values in one_curve] for one_curve in replicates])
-            for i, (_, sim) in enumerate(table.iterrows())]
-    models = {model: dict(group=rows["group"].iloc[0], free=free_parameters(rows), regulated=regulated_rates(rows.iloc[0]))
-              for model, rows in table.groupby("model_id", sort=False)}
-    control = table.loc[table["group"] == "uncoupled", "sim_id"]
-    return dict(curve_names=[name for _, _, name in CURVES], lags=clean(matrices[0][0].columns),
-                experiment=[clean(m[1]) for m in matrices], experiment_se=[clean(m[2]) for m in matrices],
-                models=models, sims=sims, control=int(control.iloc[0]) if len(control) else None, fitted=fitted,
+def json_ready(array):
+    """A numeric array as nested lists for JSON, rounded, with None where there is no value."""
+    array = np.round(np.asarray(array, dtype=float), 4)
+    return array.tolist() if not np.isnan(array).any() else np.where(np.isnan(array), None, array.astype(object)).tolist()
+
+
+def write_explorer(run_dir, table, curves, experiment, fitted, matching):
+    """Write one small data file per model into <run_dir>/explorer/ (the report loads a model's file when it is
+    picked) and return the data the report page itself embeds."""
+    folder = run_dir / "explorer"
+    folder.mkdir(exist_ok=True)
+    for old in folder.glob("model_*.js"):
+        old.unlink()
+    curve_rows = np.array([curves.rows(observable, pair)[0] for observable, pair, _ in CURVES])      # [curve, lag]
+
+    def simulations(rows):
+        """The simulations of `rows` with the mean and SE (over replicates) of every curve: curves[curve][lag], se[curve][lag]."""
+        values = curves.values[rows["curve_row"].to_numpy()[:, None, None], curve_rows[None, :, :], :]
+        means, errors = json_ready(values[..., 0]), json_ready(np.nan_to_num(values[..., 1]))
+        return [dict(id=int(sim["sim_id"]), par={name: sim[name] for name in PARAMETERS if sim[name] == sim[name]},
+                     nrmse=json_ready([sim[f"nrmse_{observable}_{pair}"] for observable, pair, _ in CURVES]),
+                     base=[float(f"{sim[column]:.4g}") for column in BASE_COLUMNS], curves=mean, se=error)
+                for sim, mean, error in zip(rows.to_dict("records"), means, errors)]
+
+    models = {}
+    for number, (model, rows) in enumerate(table.groupby("model_id", sort=False), start=1):
+        file = f"model_{number:04d}.js"
+        (folder / file).write_text(f"explorerLoaded({json.dumps(model)},{json.dumps(simulations(rows), separators=(',', ':'))});")
+        models[model] = dict(group=rows["group"].iloc[0], free=free_parameters(rows), regulated=regulated_rates(rows.iloc[0]), file=file)
+    control = table[table["group"] == "uncoupled"]
+    targets = [experiment_curve(experiment, observable, pair, curves.rows(observable, pair)[1]) for observable, pair, _ in CURVES]
+    return dict(curve_names=[name for _, _, name in CURVES], lags=json_ready(curves.rows(*CURVES[0][:2])[2]),
+                experiment=[json_ready(mean) for mean, _ in targets], experiment_se=[json_ready(se) for _, se in targets],
+                models=models, control=simulations(control)[0] if len(control) else None, fitted=fitted,
                 state_average=matching == "state_average")
 
 
@@ -349,12 +398,28 @@ const options = (select, values, labels) => { select.innerHTML = values.map((v, 
 const distinct = (sims, name) => [...new Set(sims.map(s => s.par[name]))].sort((a, b) => a - b);
 const shade = t => { const a = [158, 197, 244], b = [13, 54, 107]; return `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(",")})`; };
 
-function modelChanged() {                       // which parameter to vary
-  options($("vary"), DATA.models[$("model").value].free);
+const loaded = {};                              // model name => its simulations, once its data file has arrived
+let current = [];                               // the simulations of the model that is shown
+window.explorerLoaded = (model, sims) => {      // called by a model's data file (explorer/model_NNNN.js)
+  loaded[model] = sims;
+  if (model === $("model").value) modelChanged();
+};
+function modelChanged() {                       // fetch the model's data if needed, then list the parameters to vary
+  const model = $("model").value;
+  if (!loaded[model]) {
+    $("legend").textContent = "loading…";
+    const script = document.createElement("script");
+    script.src = "explorer/" + DATA.models[model].file;
+    script.onerror = () => { $("legend").textContent = "could not load explorer/" + DATA.models[model].file + " (keep the explorer folder next to this report)"; };
+    document.head.appendChild(script);
+    return;
+  }
+  current = loaded[model];
+  options($("vary"), DATA.models[model].free);
   varyChanged();
 }
 function varyChanged() {                        // one selector for every other free parameter (if it has few values)
-  const sims = DATA.sims.filter(s => s.model === $("model").value), vary = $("vary").value;
+  const sims = current, vary = $("vary").value;
   $("fixed").innerHTML = "";
   for (const name of DATA.models[$("model").value].free.filter(n => n !== vary)) {
     const values = distinct(sims, name);
@@ -368,14 +433,14 @@ function varyChanged() {                        // one selector for every other 
   draw();
 }
 function draw() {
-  const curve = +$("curve").value, vary = $("vary").value, show = $("show").value;
-  let sims = DATA.sims.filter(s => s.model === $("model").value);
+  const curve = +$("curve").value, vary = $("vary").value;
+  let sims = current.slice();
   for (const select of $("fixed").querySelectorAll("select")) sims = sims.filter(s => s.par[select.dataset.name] == select.value);
   if (vary) sims.sort((a, b) => a.par[vary] - b.par[vary]);
   const lags = DATA.lags, target = DATA.experiment[curve], se = DATA.experiment_se[curve];
-  const control = DATA.sims.find(s => s.id === DATA.control);
+  const control = DATA.control;
   const all = [...target.map((v, i) => v + (se[i] || 0)), ...target.map((v, i) => v - (se[i] || 0)), 0,
-               ...sims.flatMap(s => show === "replicates" ? s.reps[curve].flat() : s.curves[curve]),
+               ...sims.flatMap(s => s.curves[curve]),
                ...(control ? control.curves[curve] : [])].filter(v => v !== null);
   const few = sims.length <= 12;                // few simulations: draw each one's mean ± SE over its replicates
   let lo = Math.min(...all), hi = Math.max(...all); const pad = (hi - lo || 1) * 0.06; lo -= pad; hi += pad;
@@ -390,13 +455,9 @@ function draw() {
   const band = (mean, se, color, opacity) => `<polygon points="${mean.map((v, i) => `${x(lags[i])},${y(v + (se[i] || 0))}`)
     .concat(mean.map((v, i) => `${x(lags[i])},${y(v - (se[i] || 0))}`).reverse()).join(" ")}" fill="${color}" opacity="${opacity}"/>`;
   svg += band(target, se, "var(--ink)", 0.12);
-  if (few && show === "se") sims.forEach((s, i) => { svg += band(s.curves[curve], s.se[curve], shade(sims.length > 1 ? i / (sims.length - 1) : 0.6), 0.16); });
+  if (few) sims.forEach((s, i) => { svg += band(s.curves[curve], s.se[curve], shade(sims.length > 1 ? i / (sims.length - 1) : 0.6), 0.16); });
   if (control) svg += `<polyline points="${path(control.curves[curve])}" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="5 4"/>`;
-  sims.forEach((s, i) => {
-    const color = shade(sims.length > 1 ? i / (sims.length - 1) : 0.6);
-    if (show === "replicates") for (const replicate of s.reps[curve]) svg += `<polyline points="${path(replicate)}" fill="none" stroke="${color}" stroke-width="1"/>`;
-    else svg += `<polyline points="${path(s.curves[curve])}" fill="none" stroke="${color}" stroke-width="${few ? 2 : 1}"/>`;
-  });
+  sims.forEach((s, i) => { svg += `<polyline points="${path(s.curves[curve])}" fill="none" stroke="${shade(sims.length > 1 ? i / (sims.length - 1) : 0.6)}" stroke-width="${few ? 2 : 1}"/>`; });
   svg += `<polyline points="${path(target)}" fill="none" stroke="var(--ink)" stroke-width="2.4"/>`;
   $("chart").innerHTML = svg;
   const item = (color, text) => `<span><i style="background:${color}"></i>${text}</span>`;
@@ -423,24 +484,17 @@ function rateTable(sims, vary) {                // the regulated rates of the dr
     ${DATA.state_average ? "The base is set so that the average rate, over the time when the gene is in the state where that rate can act, equals the fitted rate; the source activity shown is over that time too."
       : "The base is set so that the average over all time equals the fitted rate."} All other rates equal their fitted values.</p>`;
 }
-for (const s of DATA.sims) {                   // mean and SE over the replicates, for every curve and lag
-  const stats = s.reps.map(reps => reps[0].map((_, i) => {
-    const v = reps.map(r => r[i]).filter(x => x !== null), n = v.length, mean = n ? v.reduce((a, b) => a + b, 0) / n : null;
-    return [mean, n > 1 ? Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1) / n) : 0];
-  }));
-  s.curves = stats.map(c => c.map(p => p[0])); s.se = stats.map(c => c.map(p => p[1]));
-}
 options($("curve"), DATA.curve_names.map((_, i) => i), DATA.curve_names);
 options($("group"), groups);
 $("group").onchange = () => { options($("model"), Object.keys(DATA.models).filter(m => DATA.models[m].group === $("group").value)); modelChanged(); };
-$("model").onchange = modelChanged; $("vary").onchange = varyChanged; $("curve").onchange = draw; $("show").onchange = draw;
+$("model").onchange = modelChanged; $("vary").onchange = varyChanged; $("curve").onchange = draw;
 $("curve").value = 1; $("group").value = groups[Math.min(1, groups.length - 1)]; $("group").onchange();
 """
 
 
 def write_report(run_dir, config, done, table, curves, experiment, experiment_on, fitted, plots):
     matching = config["simulation"].get("rate_matching", "time_average")
-    data = json.dumps(explorer_data(table, curves, experiment, fitted, matching), separators=(",", ":")).replace("</", "<\\/")
+    data = json.dumps(write_explorer(run_dir, table, curves, experiment, fitted, matching), separators=(",", ":")).replace("</", "<\\/")
     figures = "".join(
         f'<section class="card"><figure><h3>{html.escape(title)}</h3><p class="sub">{html.escape(caption)} '
         f'<a href="plots/{stem}.pdf">PDF</a> · <a href="plots/{stem}.png">PNG</a></p>'
@@ -454,12 +508,11 @@ sweep mode: {config["sweep"]["mode"]} · rate matching: {config["simulation"].ge
 <h2>Explore: how a parameter changes the curves</h2>
 <section class="card"><div class="controls">
 <label>curve<select id="curve"></select></label><label>model group<select id="group"></select></label>
-<label>model<select id="model"></select></label><label>vary<select id="vary"></select></label>
-<label>show<select id="show"><option value="se">mean ± SE</option><option value="mean">mean only</option><option value="replicates">individual replicates</option></select></label><span id="fixed" class="controls" style="margin:0"></span></div>
+<label>model<select id="model"></select></label><label>vary<select id="vary"></select></label><span id="fixed" class="controls" style="margin:0"></span></div>
 <svg id="chart" viewBox="0 0 900 380" role="img" aria-label="selected curves against experiment"></svg><div id="legend"></div>
 <div id="rates" class="scroll" style="margin-top:10px"></div>
-<p class="sub">"show" switches between the mean of a simulation's replicate datasets with a ± SE band (band drawn when 12 or
-fewer simulations are shown), the mean alone, or every replicate as its own line. Light to dark blue = increasing value of the varied parameter. If a model was sampled with many random
+<p class="sub">Every simulation curve is the mean of its replicate datasets; the band is ± SE over the replicates (drawn when 12 or
+fewer simulations are shown). The individual replicates are in the results files (columns rep1, rep2, ...). Light to dark blue = increasing value of the varied parameter. If a model was sampled with many random
 parameter sets (extensive sweep), all of them are drawn and the other parameters are not held fixed.</p></section>
 
 <h2>Summary by model group</h2><section class="card">{group_summary(table)}</section>
@@ -475,7 +528,7 @@ def main():
     if len(sys.argv) != 2:
         raise SystemExit(__doc__)
     config, run_dir, table, curves, experiment, experiment_on, done, fitted = load(Path(sys.argv[1]).resolve())
-    table.sort_values("rank").to_csv(run_dir / "ranked_scores.csv", index=False)
+    table.drop(columns="curve_row").sort_values("rank").to_csv(run_dir / "ranked_scores.csv", index=False)
     folder = run_dir / "plots"
     folder.mkdir(exist_ok=True)
     plots = []      # (file name, title, caption) of every plot, in report order
@@ -498,7 +551,7 @@ def main():
     save(on_fraction_heatmap(table, experiment_on), "10_heatmap_on_fraction", "ON fraction relative to experiment",
          "Rows as in the curve heatmaps.")
     write_report(run_dir, config, done, table, curves, experiment, experiment_on, fitted, plots)
-    print(f"Wrote {run_dir / 'results_report.html'}, {folder}/ and {run_dir / 'ranked_scores.csv'}")
+    print(f"Wrote {run_dir / 'results_report.html'} (needs plots/ and explorer/ next to it) and {run_dir / 'ranked_scores.csv'}")
 
 
 if __name__ == "__main__":

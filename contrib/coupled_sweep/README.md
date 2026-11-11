@@ -79,8 +79,9 @@ For the extensive sweep, set `mode = "extensive"` and a new `run_dir` in `config
 | `simulations.swarm` | step 5 | One line per job: 12 simulations, each with all its replicates, on 12 threads |
 | `results/curves_*.csv` | steps 4, 6 | The six correlation curves of every simulation: mean, SE, and every replicate (`rep1`, `rep2`, ...) |
 | `results/metrics_*.csv` | steps 4, 6 | One row per simulation: ON fractions and mean reporters (mean, SE and every replicate), NRMSE and CCC of the six curves, base rates |
-| `results_report.html` | step 7 | Interactive explorer (pick a model, vary one parameter), summary tables, and every plot |
+| `results_report.html` | step 7 | Interactive explorer (pick a model, vary one parameter), summary tables, and every plot. Needs `plots/` and `explorer/` next to it |
 | `plots/` | step 7 | Every plot as a PDF and a 600 dpi PNG |
+| `explorer/` | step 7 | The data the report's explorer loads when you pick a model: one small file per model (mean and SE of its curves) |
 | `ranked_scores.csv` | step 7 | Every simulation with parameters, metrics and score, best first |
 
 Each swarm job writes one `curves_` and one `metrics_` file, named by its first and last simulation.
@@ -122,3 +123,9 @@ Each swarm job writes one `curves_` and one `metrics_` file, named by its first 
 
 `score()` at the top of `4_plot_results.py` ranks the simulations (lower is better). It is the
 NRMSE of the reporter cross-correlation by default; edit it to use any saved metric.
+
+## Notes
+
+- The report shows the mean ± SE over the replicates. Every replicate is kept in `results/curves_*.csv`
+  (columns `rep1`, `rep2`, ...) and `results/metrics_*.csv` for your own plots.
+- If a simulation is in more than one results file (a test job and the swarm, say), the newest file is used.
