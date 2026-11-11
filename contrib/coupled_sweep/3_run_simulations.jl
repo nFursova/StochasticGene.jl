@@ -7,9 +7,11 @@ Step 3. Simulate the rows of simulations.csv and compare them with the experimen
     julia -t 12 3_run_simulations.jl config.toml          simulate every row on this machine
 
 Each run writes two files into <run_dir>/results/:
-    curves_<first>-<last>.csv    the six correlation curves of every simulation: mean and SE over replicates
+    curves_<first>-<last>.csv    the six correlation curves of every simulation: mean and SE over replicates,
+                                 and every replicate (columns rep1, rep2, ...)
     metrics_<first>-<last>.csv   one row per simulation: ON fractions, mean reporter counts, NRMSE and CCC,
-                                 and the base rates (rates while no source is active)
+                                 the base rates (rates while no source is active), and the ON fractions and
+                                 reporter counts of every replicate (columns on_E_rep1, ...)
 
 Names: E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit. Both genes are the 3301 model:
 promoter states 1 <-> 2 <-> 3, initiation from state 3, three reporter positions.
@@ -488,20 +490,22 @@ function run_simulations(rows, cfg, first_id, last_id)
     score_names = ["$(name)_$(observable)_$(pair)" for observable in OBSERVABLES for (pair, _, _) in PAIRS
                    for name in ("nrmse", "ccc")]
     base_names = ["base_$(gene)_$(RATE_NAMES[k])" for gene in ("E", "G") for k in 1:5]      # R12 R21 R23 R32 Initiate
+    metric_names = ("on_E", "on_G", "reporters_E", "reporters_G")
+    replicate_names = ["$(name)_rep$(r)" for name in metric_names for r in 1:cfg.replicates]
     # Write to temporary files first, so that a killed job never leaves a half-written result.
     open(curves_path * ".tmp", "w") do curves_io
         open(metrics_path * ".tmp", "w") do metrics_io
-            println(curves_io, "sim_id,observable,pair,lag_frames,lag_min,mean,se")
+            println(curves_io, "sim_id,observable,pair,lag_frames,lag_min,mean,se," * join(["rep$r" for r in 1:cfg.replicates], ','))
             println(metrics_io, "sim_id,model_id,on_E,on_E_se,on_G,on_G_se,reporters_E,reporters_E_se," *
-                                "reporters_G,reporters_G_se," * join(vcat(score_names, base_names), ','))
+                                "reporters_G,reporters_G_se," * join(vcat(score_names, base_names, replicate_names), ','))
             for (i, row) in enumerate(rows)
                 replicates = results[(i - 1) * cfg.replicates .+ (1:cfg.replicates)]
                 bins = replicates[1].curves                                   # same lag bins in every replicate
                 values = hcat([[bin.value for bin in r.curves] for r in replicates]...)
                 means = [mean_se(values[b, :]) for b in eachindex(bins)]
-                for (bin, (m, se)) in zip(bins, means)
-                    println(curves_io, join((row["sim_id"], bin.observable, bin.pair, bin.lag,
-                                             fmt(bin.lag * cfg.interval), fmt(m), fmt(se)), ','))
+                for (b, bin) in enumerate(bins)                                # mean, SE, then every replicate
+                    println(curves_io, join((row["sim_id"], bin.observable, bin.pair, bin.lag, fmt(bin.lag * cfg.interval),
+                                             fmt.(means[b])..., fmt.(values[b, :])...), ','))
                 end
                 cells = String[row["sim_id"], row["model_id"]]
                 for k in 1:4                                                  # on_E, on_G, reporters_E, reporters_G
@@ -515,6 +519,9 @@ function run_simulations(rows, cfg, first_id, last_id)
                                                   [cfg.targets[(observable, pair, bins[b].lag)] for b in use])))
                 end
                 append!(cells, fmt.(models[i].base[1, 1:5]), fmt.(models[i].base[2, 1:5]))
+                for k in 1:4                                                  # the same four metrics, every replicate
+                    append!(cells, fmt.([r.metrics[k] for r in replicates]))
+                end
                 println(metrics_io, join(cells, ','))
             end
         end

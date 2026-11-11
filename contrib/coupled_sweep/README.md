@@ -77,8 +77,8 @@ For the extensive sweep, set `mode = "extensive"` and a new `run_dir` in `config
 | `simulations.csv` | step 2 | One row per simulation: a model plus one parameter set. The simulator's work list |
 | `models_report.html` | step 3 | Schematic, regulated rates and parameter values of every model group |
 | `simulations.swarm` | step 5 | One line per job: 12 simulations, each with all its replicates, on 12 threads |
-| `results/curves_*.csv` | steps 4, 6 | The six correlation curves of every simulation: mean and SE over replicates |
-| `results/metrics_*.csv` | steps 4, 6 | One row per simulation: ON fractions, mean reporters, NRMSE and CCC of the six curves |
+| `results/curves_*.csv` | steps 4, 6 | The six correlation curves of every simulation: mean, SE, and every replicate (`rep1`, `rep2`, ...) |
+| `results/metrics_*.csv` | steps 4, 6 | One row per simulation: ON fractions and mean reporters (mean, SE and every replicate), NRMSE and CCC of the six curves, base rates |
 | `results_report.html` | step 7 | Interactive explorer (pick a model, vary one parameter), summary tables, and every plot |
 | `plots/` | step 7 | Every plot as a PDF and a 600 dpi PNG |
 | `ranked_scores.csv` | step 7 | Every simulation with parameters, metrics and score, best first |

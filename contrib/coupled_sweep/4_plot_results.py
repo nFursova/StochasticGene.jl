@@ -23,6 +23,7 @@ from matplotlib.colors import LinearSegmentedColormap
 PLOT_MAX_LAG_MIN = 120      # lag range shown in every plot
 TOP_N = 10                  # number of best simulations shown as line plots and in the table
 PNG_DPI = 600
+SHOW_REPLICATES = True      # also draw every replicate as a thin line in the top-simulation plots
 
 SCORE_NAME = "NRMSE of the reporter-count cross-correlation"
 
@@ -203,8 +204,13 @@ def top_curves(table, curves, experiment, experiment_on):
             if len(control):
                 data = select(curves[curves["sim_id"] == control.iloc[0]])
                 axis.plot(data["lag_min"], data["mean"], color=MUTED, linewidth=0.9, linestyle="--", label="uncoupled control")
+            if SHOW_REPLICATES:
+                data = select(curves[curves["sim_id"] == sim["sim_id"]])
+                for k, replicate in enumerate(c for c in curves.columns if c.startswith("rep")):
+                    axis.plot(data["lag_min"], data[replicate], color=BLUE, linewidth=0.5, alpha=0.55,
+                              label="individual replicates" if k == 0 else None)
             for data, color, text in [(select(experiment), INK, "experiment ± SE"),
-                                      (select(curves[curves["sim_id"] == sim["sim_id"]]), BLUE, "simulation ± SE over replicates")]:
+                                      (select(curves[curves["sim_id"] == sim["sim_id"]]), BLUE, "simulation mean ± SE over replicates")]:
                 axis.fill_between(data["lag_min"], data["mean"] - data["se"], data["mean"] + data["se"],
                                   color=color, alpha=0.18, linewidth=0)
                 axis.plot(data["lag_min"], data["mean"], color=color, linewidth=1.3, label=text)
@@ -217,7 +223,7 @@ def top_curves(table, curves, experiment, experiment_on):
             if row == len(best) - 1:
                 axis.set_xlabel("lag (min)", fontsize=7.5)
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    figure.legend(handles, labels, loc="upper right", ncol=3, frameon=False, fontsize=8)
+    figure.legend(handles, labels, loc="upper right", ncol=4, frameon=False, fontsize=8)
     figure.suptitle(f"The {len(best)} best simulations (lowest score)", x=0.02, ha="left", fontsize=11, fontweight="bold")
     height = figure.get_figheight()
     figure.subplots_adjust(left=0.2, right=0.99, top=1 - 0.8 / height, bottom=0.5 / height, wspace=0.24, hspace=0.28)
@@ -301,14 +307,14 @@ def explorer_data(table, curves, experiment, fitted):
     """Everything the interactive explorer needs, as one JSON object."""
     clean = lambda values: [None if v != v else round(float(v), 4) for v in values]
     matrices = [curve_matrix(curves, experiment, observable, pair) for observable, pair, _ in CURVES]
-    per_curve = [m[0].reindex(table["sim_id"]).to_numpy() for m in matrices]
-    per_curve_se = [curve_matrix(curves, experiment, observable, pair, "se")[0].reindex(table["sim_id"]).to_numpy()
-                    for observable, pair, _ in CURVES]
+    # Every replicate of every curve; the page computes mean and SE from them.
+    replicates = [[curve_matrix(curves, experiment, observable, pair, column)[0].reindex(table["sim_id"]).to_numpy()
+                   for column in curves.columns if column.startswith("rep")] for observable, pair, _ in CURVES]
     sims = [dict(id=int(sim["sim_id"]), model=sim["model_id"],
                  par={name: float(sim[name]) for name in PARAMETERS if pd.notna(sim[name])},
                  nrmse=clean(sim[f"nrmse_{observable}_{pair}"] for observable, pair, _ in CURVES),
                  base=[float(f"{sim[column]:.4g}") for column in BASE_COLUMNS],
-                 curves=[clean(values[i]) for values in per_curve], se=[clean(values[i]) for values in per_curve_se])
+                 reps=[[clean(values[i]) for values in one_curve] for one_curve in replicates])
             for i, (_, sim) in enumerate(table.iterrows())]
     models = {model: dict(group=rows["group"].iloc[0], free=free_parameters(rows), regulated=regulated_rates(rows.iloc[0]))
               for model, rows in table.groupby("model_id", sort=False)}
@@ -361,14 +367,15 @@ function varyChanged() {                        // one selector for every other 
   draw();
 }
 function draw() {
-  const curve = +$("curve").value, vary = $("vary").value;
+  const curve = +$("curve").value, vary = $("vary").value, show = $("show").value;
   let sims = DATA.sims.filter(s => s.model === $("model").value);
   for (const select of $("fixed").querySelectorAll("select")) sims = sims.filter(s => s.par[select.dataset.name] == select.value);
   if (vary) sims.sort((a, b) => a.par[vary] - b.par[vary]);
   const lags = DATA.lags, target = DATA.experiment[curve], se = DATA.experiment_se[curve];
   const control = DATA.sims.find(s => s.id === DATA.control);
   const all = [...target.map((v, i) => v + (se[i] || 0)), ...target.map((v, i) => v - (se[i] || 0)), 0,
-               ...sims.flatMap(s => s.curves[curve]), ...(control ? control.curves[curve] : [])].filter(v => v !== null);
+               ...sims.flatMap(s => show === "replicates" ? s.reps[curve].flat() : s.curves[curve]),
+               ...(control ? control.curves[curve] : [])].filter(v => v !== null);
   const few = sims.length <= 12;                // few simulations: draw each one's mean ± SE over its replicates
   let lo = Math.min(...all), hi = Math.max(...all); const pad = (hi - lo || 1) * 0.06; lo -= pad; hi += pad;
   const W = 900, H = 380, L = 56, R = 12, T = 10, B = 40;
@@ -382,9 +389,13 @@ function draw() {
   const band = (mean, se, color, opacity) => `<polygon points="${mean.map((v, i) => `${x(lags[i])},${y(v + (se[i] || 0))}`)
     .concat(mean.map((v, i) => `${x(lags[i])},${y(v - (se[i] || 0))}`).reverse()).join(" ")}" fill="${color}" opacity="${opacity}"/>`;
   svg += band(target, se, "var(--ink)", 0.12);
-  if (few) sims.forEach((s, i) => { svg += band(s.curves[curve], s.se[curve], shade(sims.length > 1 ? i / (sims.length - 1) : 0.6), 0.16); });
+  if (few && show === "se") sims.forEach((s, i) => { svg += band(s.curves[curve], s.se[curve], shade(sims.length > 1 ? i / (sims.length - 1) : 0.6), 0.16); });
   if (control) svg += `<polyline points="${path(control.curves[curve])}" fill="none" stroke="var(--muted)" stroke-width="1.5" stroke-dasharray="5 4"/>`;
-  sims.forEach((s, i) => { svg += `<polyline points="${path(s.curves[curve])}" fill="none" stroke="${shade(sims.length > 1 ? i / (sims.length - 1) : 0.6)}" stroke-width="${sims.length > 12 ? 1 : 2}"/>`; });
+  sims.forEach((s, i) => {
+    const color = shade(sims.length > 1 ? i / (sims.length - 1) : 0.6);
+    if (show === "replicates") for (const replicate of s.reps[curve]) svg += `<polyline points="${path(replicate)}" fill="none" stroke="${color}" stroke-width="1"/>`;
+    else svg += `<polyline points="${path(s.curves[curve])}" fill="none" stroke="${color}" stroke-width="${few ? 2 : 1}"/>`;
+  });
   svg += `<polyline points="${path(target)}" fill="none" stroke="var(--ink)" stroke-width="2.4"/>`;
   $("chart").innerHTML = svg;
   const item = (color, text) => `<span><i style="background:${color}"></i>${text}</span>`;
@@ -409,10 +420,17 @@ function rateTable(sims, vary) {                // the regulated rates of the dr
   $("rates").innerHTML = `<table>${rows}</table><p class="sub">Rates per minute. Base = the rate while its source is inactive; regulated = base × fold.
     The base is set so that the long-run average equals the fitted rate. All other rates equal their fitted values.</p>`;
 }
+for (const s of DATA.sims) {                   // mean and SE over the replicates, for every curve and lag
+  const stats = s.reps.map(reps => reps[0].map((_, i) => {
+    const v = reps.map(r => r[i]).filter(x => x !== null), n = v.length, mean = n ? v.reduce((a, b) => a + b, 0) / n : null;
+    return [mean, n > 1 ? Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1) / n) : 0];
+  }));
+  s.curves = stats.map(c => c.map(p => p[0])); s.se = stats.map(c => c.map(p => p[1]));
+}
 options($("curve"), DATA.curve_names.map((_, i) => i), DATA.curve_names);
 options($("group"), groups);
 $("group").onchange = () => { options($("model"), Object.keys(DATA.models).filter(m => DATA.models[m].group === $("group").value)); modelChanged(); };
-$("model").onchange = modelChanged; $("vary").onchange = varyChanged; $("curve").onchange = draw;
+$("model").onchange = modelChanged; $("vary").onchange = varyChanged; $("curve").onchange = draw; $("show").onchange = draw;
 $("curve").value = 1; $("group").value = groups[Math.min(1, groups.length - 1)]; $("group").onchange();
 """
 
@@ -432,11 +450,12 @@ sweep mode: {config["sweep"]["mode"]} · score = {html.escape(SCORE_NAME)} (lowe
 <h2>Explore: how a parameter changes the curves</h2>
 <section class="card"><div class="controls">
 <label>curve<select id="curve"></select></label><label>model group<select id="group"></select></label>
-<label>model<select id="model"></select></label><label>vary<select id="vary"></select></label><span id="fixed" class="controls" style="margin:0"></span></div>
+<label>model<select id="model"></select></label><label>vary<select id="vary"></select></label>
+<label>show<select id="show"><option value="se">mean ± SE</option><option value="mean">mean only</option><option value="replicates">individual replicates</option></select></label><span id="fixed" class="controls" style="margin:0"></span></div>
 <svg id="chart" viewBox="0 0 900 380" role="img" aria-label="selected curves against experiment"></svg><div id="legend"></div>
 <div id="rates" class="scroll" style="margin-top:10px"></div>
-<p class="sub">Every simulation curve is the mean of its replicate datasets; the band is ± SE over the replicates (drawn when
-12 or fewer simulations are shown). Light to dark blue = increasing value of the varied parameter. If a model was sampled with many random
+<p class="sub">"show" switches between the mean of a simulation's replicate datasets with a ± SE band (band drawn when 12 or
+fewer simulations are shown), the mean alone, or every replicate as its own line. Light to dark blue = increasing value of the varied parameter. If a model was sampled with many random
 parameter sets (extensive sweep), all of them are drawn and the other parameters are not held fixed.</p></section>
 
 <h2>Summary by model group</h2><section class="card">{group_summary(table)}</section>
