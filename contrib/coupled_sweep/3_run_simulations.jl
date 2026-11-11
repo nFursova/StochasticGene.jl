@@ -274,8 +274,14 @@ function simulate_stochasticgene(model, cfg)
         append!(rates, model.base[u, :], NOISE)
     end
     append!(rates, fill(model.gamma, length(model.edges)))      # one coupling strength per connection
-    connections = [(unit(edge.source), edge.state, unit(edge.target), edge.rate) for edge in model.edges]
-    hidden_transitions = GENE_TRANSITIONS[1:length(model.hidden_rates)]
+    # StochasticGene starts every unit in state 1 and draws its first reaction times without the coupling,
+    # so the hidden unit must start in a state that regulates nothing. H2 does (state 2 regulates).
+    # For H3 the hidden states are renumbered for StochasticGene only: its state 1 is our middle state 2,
+    # its state 2 is our state 1 (regulates E), state 3 stays state 3 (regulates G).
+    renumber(state) = model.nh == 3 ? (2, 1, 3)[state] : state
+    hidden_transitions = model.nh == 3 ? ((2, 1), (1, 2), (1, 3), (3, 1)) : GENE_TRANSITIONS[1:2]    # order of h12 h21 h23 h32
+    connections = [(unit(edge.source), edge.source == 3 ? renumber(edge.state) : edge.state, unit(edge.target), edge.rate)
+                   for edge in model.edges]
     transitions = hidden ? (hidden_transitions, GENE_TRANSITIONS, GENE_TRANSITIONS) : (GENE_TRANSITIONS, GENE_TRANSITIONS)
     G = hidden ? (model.nh, 3, 3) : (3, 3)
     R = hidden ? (0, 3, 3) : (3, 3)
