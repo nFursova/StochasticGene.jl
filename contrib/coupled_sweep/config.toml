@@ -22,6 +22,8 @@ mode = "grid"                        # "grid":      every combination of the val
 coupling_fold = [3.0, 10.0, 30.0, 100.0]     # regulated rates are multiplied by this while the source is active
 hidden_rate = [0.01, 0.1, 1.0, 10.0]         # hidden-unit switching rates, per minute
 n_extensive = 100
+reciprocal_states = "same"           # reciprocal models: "same" = both directions regulate from the same source state
+                                     # (1, 2, 3 or R); "all_pairs" = every pair of source states (4 times more models)
 seed = 1                             # random seed of the extensive sampling
 
 [simulation]

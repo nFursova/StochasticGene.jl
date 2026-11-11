@@ -92,7 +92,7 @@ Each swarm job writes one `curves_` and one `metrics_` file, named by its first 
 | `uncoupled` | none (control) | none |
 | `E_to_G` | CCAT1 regulates MYC from one source state: promoter state 1, 2, 3, or R | fold |
 | `G_to_E` | MYC regulates CCAT1 from one source state: promoter state 1, 2, 3, or R | fold |
-| `reciprocal` | both directions, each from promoter state 3, same fold | fold |
+| `reciprocal` | both directions, same fold; source states set by `reciprocal_states` (same state in both directions, or all pairs) | fold |
 | `H2` | hidden state 2 regulates both genes | fold, h12, h21 |
 | `H3_symmetric` | hidden state 1 regulates CCAT1, state 3 regulates MYC, state 2 nothing; h32 = h12, h23 = h21 | fold, h12, h21 |
 | `H3_asymmetric` | same; four independent rates | fold, h12, h21, h23, h32 |
