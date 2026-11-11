@@ -1,109 +1,113 @@
-# Coupled CCAT1–MYC sweeps with StochasticGene's simulator
+# Coupled CCAT1–MYC model sweep
 
-`simulate_coupled_sweep.jl` extends `simulate_shared_hidden_sweep.jl`. Traces are
-still simulated by `StochasticGene.simulate_trace_vector`. The rate layout, the
-`time_average` rate convention, the seeds, the Cartesian `[sweep]` and the
-original output files are unchanged.
+E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit.
 
-## Run
-
-```bash
-julia -t 16 --project=$SG_PROJECT contrib/coupled_sweep/simulate_coupled_sweep.jl CONFIG.toml --check
-```
-
-`--check` builds and validates every scenario, writes `sweep_points.csv` and
-`sweep_design.csv`, and prints the burn-in range. It simulates nothing. Then:
-
-```bash
-julia -t 16 --project=$SG_PROJECT contrib/coupled_sweep/simulate_coupled_sweep.jl CONFIG.toml
-```
-
-To split a large sweep across jobs, give a scenario range. Its output files get the
-suffix `_scenarios_FIRST-LAST`:
-
-```bash
-julia -t 16 --project=$SG_PROJECT contrib/coupled_sweep/simulate_coupled_sweep.jl CONFIG.toml 1 96
-```
-
-## Direct and reciprocal coupling configs
-
-`direct_CCAT1_MYC_sweep.toml` is generated; to change it, edit `direct_base.toml`
-and regenerate:
-
-```bash
-python3 contrib/coupled_sweep/make_direct_sweep.py contrib/coupled_sweep/direct_base.toml contrib/coupled_sweep/direct_CCAT1_MYC_sweep.toml
-```
-
-Default rate sets: R12, R21, R23, R32, Initiate, R12+R23, R21+R32,
-R12+R23+Initiate and R21+R32+Initiate. The source gene regulates from promoter
-state 3. The generated schemes are:
-
-- 1 uncoupled control
-- 9 CCAT1 → MYC
-- 9 MYC → CCAT1
-- 81 reciprocal (every pairing of the two directions)
-
-With 4 folds that makes 400 scenarios, each with 3 replicate datasets
-(`nsim = 3`). Useful options:
-
-- `--source-states 1 2 3`
-- `--rate-sets R12 Initiate`
-- `--mode inhibit`
-- `--no-one-way`
-
-## Configuration additions
-
-| Setting | Meaning |
+| File | What it is |
 |---|---|
-| `[hidden] topology` | `"none"`, `"H2"` (default when `[hidden]` exists) or `"H3"` (chain 1 ⇄ 2 ⇄ 3, rates `R12 R21 R23 R32`; `symmetric = true` sets R23 = R21, R32 = R12) |
-| `[[coupling]] source` | `"hidden"` (default), `"gene1"` or `"gene2"` |
-| `[[coupling]] source_state` | Hidden state, or the source gene's promoter (G) state. Defaults to 2 for H2 |
-| `[sweep] hidden_R23`, `hidden_R32` | Sweep the H3 rates |
-| `[simulation] equilibration_timescales` | Burn-in = this × the slowest relaxation time (default 10) |
-| `[simulation] trace_lengths_csv` | `experimental_lengths.csv` from `experimental.R`: simulate the experimental trace lengths (replaces `ntraces`, `nframes`) |
-| `[simulation] epsilon` | Added to traces for the six multi-tau curves, as in `experimental.R` (default 1e-7) |
-| `[scoring] experimental_csv`, `max_lag_min` | Score each scenario against `experimental.csv` (matched on `lag_frames`) |
+| `config.toml` | The one file you edit: input files, sweep, simulation and swarm settings |
+| `1_generate_models.py` | Lists every model and every parameter set |
+| `2_model_report.py` | Draws the models and parameters as an HTML page, to check before simulating |
+| `3_run_simulations.jl` | Runs the simulations (either simulator) and writes the swarm file |
+| `4_plot_results.py` | Plots the results against experiment and ranks the simulations |
 
-Coupling rules are StochasticGene's: blocks regulating the same rate add,
-rate = base × (1 + Σ active gammas), with gamma = fold − 1 (activate) or 1/fold − 1
-(inhibit). A scenario whose combined factor is ≤ 0 in any promoter state stops the
-run before anything is simulated.
+Needs Python 3.11+ with numpy, pandas and matplotlib, and Julia. StochasticGene is only needed for
+`simulator = "stochasticgene"`.
 
-`rate_reference = "time_average"` chooses base rates so that each coupled rate's
-stationary time average equals the supplied rate, solved on the joint promoter
-chain (at most 27 states). With hidden sources this is your original closed form
-OFF = supplied / ((1 − p) + pF). With gene sources it is iterated, because the
-source's occupancy depends on the coupling. `"on"` is only allowed when one block
-regulates the rate.
+## Steps
 
-## Burn-in
+**1. Edit `config.toml`.**
 
-Each trace starts in promoter state 1 with no reporters, and StochasticGene runs it
-for `warmup` minutes before recording. The original rule was
-10 × max(hidden relaxation, 1 / slowest average rate). For CCAT1 that is about 9,500
-minutes, because R12 = 0.00105/min. The real slowest relaxation time of the CCAT1
-promoter is 401 min, and the script now uses it: computed exactly from the promoter
-chain, and from the reporter traversal time. The default of 10 timescales gives
-about 4,000 min with the same safety margin. 7–8 timescales leaves an
-initial-state bias of about 0.1%.
+- `[inputs]`: the two fitted-rate files, and `experimental.csv` and `experimental_metrics.csv` from
+  `experimental.R`.
+- `[output] run_dir`: the folder for this run.
+- `[sweep] mode`: `"grid"` or `"extensive"`.
+- `[simulation] simulator`: `"fast"` or `"stochasticgene"`.
+- `[swarm] julia_project`: your StochasticGene project folder (only for `"stochasticgene"`).
 
-## Outputs (per configuration or scenario range)
+**2. Generate the models.**
 
-The original files are unchanged:
+```bash
+python3 1_generate_models.py config.toml
+```
 
-- `metrics.csv`
-- `metrics_summary.csv` (adds mean reporter counts)
-- `xcor.csv`
-- `xcor_summary.csv`
-- `xcor_multitau.csv` and `xcor_multitau_summary.csv` (binary gene1 × gene2)
-- `sweep_points.csv`
-- `baseline_binary_traces.csv`
+**3. Check what will be simulated.** Open `<run_dir>/models_report.html`.
 
-New files:
+```bash
+python3 2_model_report.py config.toml
+```
 
-- `sweep_design.csv`: hidden occupancies, coupling edges, input/base/time-average
-  rates, relaxation times and burn-in per scenario.
-- `multitau_all.csv`, `multitau_all_summary.csv`: binary and reporter-count curves,
-  EE/GG/EG, all lags, computed exactly as `experimental.R` computes its targets.
-- `scores.csv` (with `[scoring]`): NRMSE, Lin's CCC and the center/left/right means
-  of each mean curve against the experimental target.
+**4. Test one job** (simulations 1 to 12) before submitting everything.
+
+```bash
+julia -t 12 --project=$SG_PROJECT 3_run_simulations.jl config.toml 1 12
+```
+
+**5. Write the swarm file.** This prints the `swarm` command to submit it.
+
+```bash
+julia 3_run_simulations.jl config.toml --swarm
+```
+
+**6. Submit the swarm** with the printed command. It looks like this:
+
+```bash
+swarm -f runs/grid/simulations.swarm -t 12 -g 8 --time 08:00:00 --module julia --logdir runs/grid/swarm_logs
+```
+
+**7. Plot and rank.** Open `<run_dir>/plots.pdf` and `<run_dir>/ranked_scores.csv`.
+
+```bash
+python3 4_plot_results.py config.toml
+```
+
+For the extensive sweep, set `mode = "extensive"` and a new `run_dir` in `config.toml`, then repeat from step 2.
+
+## What ends up in the run folder
+
+| File | Written by | Contents |
+|---|---|---|
+| `models.csv` | step 2 | One row per model: what regulates what, and the parameter values tested |
+| `simulations.csv` | step 2 | One row per simulation: a model plus one parameter set. The simulator's work list |
+| `models_report.html` | step 3 | Schematic, regulated rates and parameter values of every model group |
+| `simulations.swarm` | step 5 | One line per job: 12 simulations, each with all its replicates, on 12 threads |
+| `results/curves_*.csv` | steps 4, 6 | The six correlation curves of every simulation: mean and SE over replicates |
+| `results/metrics_*.csv` | steps 4, 6 | One row per simulation: ON fractions, mean reporters, NRMSE and CCC of the six curves |
+| `plots.pdf` | step 7 | Heatmaps of every curve and of the ON fractions; line plots of the ten best simulations |
+| `ranked_scores.csv` | step 7 | Every simulation with parameters, metrics and score, best first |
+
+Each swarm job writes one `curves_` and one `metrics_` file, named by its first and last simulation.
+
+## The models
+
+| Group | Coupling | Parameters swept |
+|---|---|---|
+| `uncoupled` | none (control) | none |
+| `E_to_G` | CCAT1 in promoter state 3 regulates MYC | fold |
+| `G_to_E` | MYC in promoter state 3 regulates CCAT1 | fold |
+| `reciprocal` | both, same fold | fold |
+| `H2_symmetric` | hidden state 2 regulates both genes; h21 = h12 | fold, h12 |
+| `H2_asymmetric` | same; independent h12, h21 | fold, h12, h21 |
+| `H3_symmetric` | hidden state 1 regulates CCAT1, state 3 regulates MYC; h23 = h21, h32 = h12 | fold, h12, h21 |
+| `H3_asymmetric` | same; four independent rates | fold, h12, h21, h23, h32 |
+
+- Regulated rates: each model multiplies one of nine rate sets by the fold: R12, R21, R23, R32,
+  Initiate, R12+R23, R21+R32, R12+R23+Initiate, R21+R32+Initiate. Reciprocal models take every
+  pairing of the two directions (81 models).
+- Controls: every group also has one model with fold 1 (gamma = 0).
+- Rate matching: base rates are rescaled so that each regulated rate's long-run average equals its
+  fitted value, as `rate_reference = "time_average"` did in the original sweep.
+- `grid`: every combination of the listed fold and hidden-rate values.
+- `extensive`: 100 random combinations per model. Each parameter takes 100 log-spaced values over
+  the same range, each used once.
+
+## The two simulators
+
+- `fast`: lists all states of the system, starts each trace from the exact long-run distribution
+  (no burn-in) and runs a Gillespie simulation.
+- `stochasticgene`: `StochasticGene.simulate_trace_vector`, as in `simulate_shared_hidden_sweep.jl`.
+  Each trace runs for a burn-in of `warmup_timescales` (3) / slowest rate before recording.
+
+## Scoring
+
+`score()` at the top of `4_plot_results.py` ranks the simulations (lower is better). It is the
+NRMSE of the reporter cross-correlation by default; edit it to use any saved metric.

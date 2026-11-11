@@ -1,0 +1,42 @@
+# The one file you edit. All four scripts read it.
+# Paths are relative to the folder that holds this file (or absolute).
+
+[inputs]
+rates_E = "data/rates_3Prime-5Prime-h2-3301none-enhancer-3Prime.txt"   # CCAT1 (enhancer, E) fitted rates
+rates_G = "data/rates_3Prime-5Prime-h2-3301none-gene-3Prime.txt"       # MYC (gene, G) fitted rates
+rate_statistic = "median"                                # row of the rates files: ml, mean, median or last
+experimental_curves = "data/experimental.csv"            # from experimental.R: observable, pair, lag_frames, lag_min, mean, se
+experimental_metrics = "data/experimental_metrics.csv"   # from experimental.R: metric, mean, se
+trace_lengths = ""                                       # optional experimental_lengths.csv; "" = every trace has nframes frames
+
+[output]
+run_dir = "runs/grid"                # everything is written here
+
+[sweep]
+mode = "grid"                        # "grid":      every combination of the values below
+                                     # "extensive": n_extensive random combinations per model,
+                                     #              each parameter log-spaced between the smallest and largest value below
+coupling_fold = [3.0, 10.0, 30.0, 100.0]     # regulated rates are multiplied by this while the source is active
+hidden_rate = [0.01, 0.1, 1.0, 10.0]         # hidden-unit switching rates, per minute
+n_extensive = 100
+seed = 1                             # random seed of the extensive sampling
+
+[simulation]
+simulator = "fast"                   # "fast" or "stochasticgene"
+replicates = 3                       # independent datasets per simulation
+ntraces = 137                        # traces per dataset
+nframes = 216                        # frames per trace
+interval_min = 1.6666666666666667    # minutes between frames
+warmup_timescales = 3.0              # stochasticgene only: burn-in = this / slowest rate
+epsilon = 1e-7                       # added to traces before correlating, as in experimental.R
+score_max_lag_min = 90.0             # NRMSE and CCC use lags within +/- this many minutes
+seed = 20261106
+
+[swarm]
+simulations_per_job = 12             # simulations in one swarm line (all replicates of a simulation stay together)
+threads = 12                         # threads per swarm line
+memory_gb = 8
+walltime = "08:00:00"
+julia = "julia"
+julia_project = ""                   # StochasticGene project folder; needed for simulator = "stochasticgene"
+modules = "julia"

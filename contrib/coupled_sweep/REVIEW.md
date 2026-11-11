@@ -83,25 +83,11 @@ StochasticGene already supports every architecture the screen added, through
 
 ## What this folder does instead
 
-`simulate_coupled_sweep.jl` extends the original sweep on StochasticGene's
-simulator; see README.md.
+See README.md. The pipeline is one config file and four scripts: generate the models, report
+them, simulate (fast simulator or StochasticGene), and plot. Tested here:
 
-Burn-in now uses the exact relaxation time:
-
-- CCAT1 promoter: 401 min, against 950 min from the slowest-rate rule.
-- Reciprocal coupling at fold 1,000: about 980 min.
-
-Python checks of the rate-matching maths (not the Julia code itself):
-
-- With hidden sources it reproduces the original closed form to 12 digits, up to
-  fold 100,000.
-- Reciprocal coupling converges to a relative error of 1e-13.
-
-Reciprocal designs are generated from 9 rate sets with 3 replicate datasets
-(`make_direct_sweep.py`).
-
-Not yet run in Julia. Before a full sweep:
-
-1. Run `--check`.
-2. Run one or two scenarios of the original H2 configuration and compare them
-   with earlier results.
+- The generator, report and plotting scripts were run end to end.
+- The simulation runner (Julia) could not be run here. Its algorithm was checked with a Python
+  copy: simulated ON fractions match the exact long-run values within sampling noise, the average
+  rates match the fitted rates to 1e-10 or better, and the rate matching converges for
+  all 81 reciprocal pairings up to fold 10,000.
