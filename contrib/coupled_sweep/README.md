@@ -43,6 +43,8 @@ Rscript 0_experimental.R fcs_multitau_xcor_final.R CCAT1_predictedtraces.csv MYC
 - `[output] run_dir`: the folder for this run.
 - `[sweep] mode`: `"grid"` or `"extensive"`.
 - `[simulation] simulator`: `"fast"` or `"stochasticgene"`.
+- `[report]`: which curves the report draws, e.g. `observables = ["reporter"]` and `curves = ["EG"]` to skip the
+  ON/OFF-state and autocorrelation plots (leave the section out to draw everything).
 - `[swarm] julia_project`: your StochasticGene project folder (only for `"stochasticgene"`).
 
 **2. Generate the models.**
@@ -94,6 +96,7 @@ For the extensive sweep, set `mode = "extensive"` and a new `run_dir` in `config
 | `results/curves_*.csv` | steps 4, 6 | The six correlation curves of every simulation: mean, SE, and every replicate (`rep1`, `rep2`, ...) |
 | `results/metrics_*.csv` | steps 4, 6 | One row per simulation: ON fractions and mean reporters (mean, SE and every replicate), NRMSE and CCC of the six curves, base rates |
 | `results_report.html` | step 7 | Interactive explorer (pick a model, vary one parameter), summary tables, and every plot. Needs `plots/` and `explorer/` next to it |
+| (in the report) | step 7 | One row per architecture with its best parameter set (by NRMSE and by CCC): all architectures, and the top 100; rows grouped by model group and sub-type and sorted by fit, with a sub-type bar and a fit bar. A shape map: every simulation's cross-correlation centre against its flanks, per group |
 | `plots/` | step 7 | Every plot as a PDF and a 600 dpi PNG |
 | `explorer/` | step 7 | The data the report's explorer loads when you pick a model: one small file per model (mean and SE of its curves) |
 | `ranked_scores.csv` | step 7 | Every simulation with parameters, metrics and score, best first |

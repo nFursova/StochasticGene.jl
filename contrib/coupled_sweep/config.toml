@@ -40,6 +40,10 @@ h21 = [0.001, 1000.0]                # hidden rate state 2 -> 1          (H3: in
 h23 = [0.001, 1000.0]                # H3 only: inactive state 2 -> G-active state 3
 h32 = [0.001, 1000.0]                # H3 only: G-active state 3 -> inactive state 2
 
+[report]                             # what 4_plot_results.py draws (leave out a value to skip its plots)
+observables = ["reporter", "binary"] # reporter = reporter count, binary = ON/OFF state
+curves = ["EG", "EE", "GG"]          # EG = CCAT1 x MYC cross-correlation, EE / GG = CCAT1 / MYC autocorrelation
+
 [simulation]
 simulator = "fast"                   # "fast" or "stochasticgene"
 replicates = 3                       # independent datasets per simulation

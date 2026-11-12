@@ -66,6 +66,10 @@ h32 = 0.02
 parameter_sets = 100
 replicates = 10                     
 
+[report]                             # what 4_plot_results.py draws (leave out a value to skip its plots)
+observables = ["reporter", "binary"] # reporter = reporter count, binary = ON/OFF state
+curves = ["EG", "EE", "GG"]          # EG = CCAT1 x MYC cross-correlation, EE / GG = CCAT1 / MYC autocorrelation
+
 [simulation]
 simulator = "fast"                  
 ntraces = 137

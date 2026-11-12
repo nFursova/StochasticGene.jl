@@ -26,6 +26,7 @@ from matplotlib.colors import LinearSegmentedColormap
 
 PLOT_MAX_LAG_MIN = 120      # lag range shown in every plot
 TOP_N = 10                  # number of best simulations shown as line plots and in the table
+TOP_ARCHITECTURES = 100     # number of architectures on the "top architectures" pages
 PNG_DPI = 600
 A4 = (8.27, 11.69)          # page size of the heatmaps, inches
 HAT_CENTER_MIN = 10         # Mexican-hat shape: the cross-correlation should be positive within +/- this many minutes
@@ -70,6 +71,8 @@ BASE_COLUMNS = [f"base_{gene}_{rate}" for gene in "EG" for rate in RATES]
 INK, MUTED, BLUE = "#0b0b0b", "#898781", "#2a78d6"
 DIVERGING = LinearSegmentedColormap.from_list("blue_gray_red", ["#104281", "#2a78d6", "#f0efec", "#e34948", "#8f1f1f"])
 DIVERGING.set_bad("#c3c2b7")      # no data
+TYPE_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]     # sub-type bar: neighbouring sub-types get different colours
+FIT_COLORS = LinearSegmentedColormap.from_list("fit", ["#e8f1fd", "#86b6ef", "#2a78d6", "#0d366b"])   # fit bar: darker = better
 
 # ---------------------------------------------------------------------------
 # Data
@@ -480,6 +483,129 @@ def top_curves(table, curves, experiment, experiment_on):
     return figure
 
 
+def best_per_architecture(table, column, ascending, top=None):
+    """The best parameter set of every architecture (model_id) by `column`, optionally only the `top` best
+    architectures; ordered by group and sub-type as in `table` (display order), then by fit, best first."""
+    best = table.sort_values(column, ascending=ascending, na_position="last").drop_duplicates("model_id")
+    if top is not None:
+        best = best.head(top)
+    group_rank = {group: i for i, group in enumerate(dict.fromkeys(table["group"]))}
+    type_rank = {key: i for i, key in enumerate(dict.fromkeys(zip(table["group"], table["block1"])))}
+    return (best.assign(group_rank=best["group"].map(group_rank), type_rank=[type_rank[key] for key in zip(best["group"], best["block1"])])
+            .sort_values(["group_rank", "type_rank", column], ascending=[True, True, ascending], na_position="last")
+            .drop(columns=["group_rank", "type_rank"]))
+
+
+def architecture_heatmap(title, rows, curves, experiment, observable, column, ascending):
+    """One row per architecture (its best parameter set), all groups on one A4 page.
+    Left bar: model sub-type (neighbouring sub-types differ in colour; names where they fit). Middle: the
+    cross-correlation. Right bar: the fit of the row (darker = better)."""
+    lag_rows, lag_frames, lags = curves.rows(observable, "EG")
+    target, _ = experiment_curve(experiment, observable, "EG", lag_frames)
+    values = mean_curves(curves, rows, lag_rows)
+    fit = rows[column].to_numpy(dtype=float)
+    low, high = np.nanpercentile(fit, [2, 98]) if np.isfinite(fit).any() else (0, 1)
+    groups = list(dict.fromkeys(rows["group"]))
+    counts = [int((rows["group"] == group).sum()) for group in groups]
+    figure, axes = plt.subplots(len(groups) + 1, 3, figsize=A4, squeeze=False,
+                                gridspec_kw=dict(width_ratios=[0.035, 1, 0.035], wspace=0.03, hspace=0.07,
+                                                 height_ratios=[1] + [1 + 2 * np.log10(count) for count in counts]))
+    points = 72 * A4[1] * 0.9 * 0.93 / (1 + sum(1 + 2 * np.log10(count) for count in counts))
+    x_edges, limit = bin_edges(lags), 2 * np.nanmax(np.abs(target))
+    for axis in axes.flat:                              # no ticks except the lag axis and the sub-type names set below
+        axis.set_yticks([])
+        axis.set_xticks([])
+        for spine in axis.spines.values():
+            spine.set_visible(False)
+    axes[0, 1].pcolorfast(x_edges, [0, 1], np.ma.masked_invalid(target[None, :]), cmap=DIVERGING, vmin=-limit, vmax=limit)
+    axes[0, 0].set_ylabel("experiment", rotation=0, ha="right", va="center", fontsize=8, fontweight="bold")
+    for i, (group, count) in enumerate(zip(groups, counts), start=1):
+        inside = (rows["group"] == group).to_numpy()
+        types = rows["block1"].to_numpy()[inside]
+        starts, names = blocks_at([types], 0)
+        number = np.cumsum(np.r_[True, types[1:] != types[:-1]]) - 1                   # sub-type number of every row
+        colors = matplotlib.colors.ListedColormap(TYPE_COLORS)
+        axes[i, 0].pcolorfast([0, 1], np.arange(count + 1), (number % len(TYPE_COLORS))[:, None], cmap=colors,
+                              vmin=-0.5, vmax=len(TYPE_COLORS) - 0.5)
+        image = axes[i, 1].pcolorfast(x_edges, np.arange(count + 1), np.ma.masked_invalid(values[inside]),
+                                      cmap=DIVERGING, vmin=-limit, vmax=limit)
+        fit_image = axes[i, 2].pcolorfast([0, 1], np.arange(count + 1), np.ma.masked_invalid(fit[inside][:, None]),
+                                          cmap=FIT_COLORS if not ascending else FIT_COLORS.reversed(), vmin=low, vmax=high)
+        height = (1 + 2 * np.log10(count)) * points
+        if 1 < len(starts) <= height / 1.5:
+            axes[i, 1].hlines(starts[1:], x_edges[0], x_edges[-1], color="white", linewidth=0.5)
+        if len(starts) <= height / 5:                    # sub-type names, where they fit
+            axes[i, 0].set_yticks((starts + np.r_[starts[1:], count]) / 2, list(names), fontsize=min(6.0, 0.8 * height / len(starts)))
+            axes[i, 0].tick_params(axis="y", length=0, pad=2)
+        axes[i, 0].set_ylabel(f"{group}\n{count:,} architecture{'s' * (count > 1)}", rotation=0, ha="right", va="center",
+                              fontsize=8, labelpad=48 if len(starts) <= height / 5 else 4)
+    for axis in axes.flat:
+        axis.invert_yaxis()
+    axes[-1, 1].set_xticks([-100, -50, 0, 50, 100])
+    axes[-1, 1].set_xlim(x_edges[0], x_edges[-1])
+    axes[-1, 1].tick_params(axis="x", length=3, colors=MUTED, labelcolor=INK, labelsize=7)
+    axes[-1, 1].set_xlabel("lag (min); positive = MYC after CCAT1", fontsize=8)
+    axes[0, 2].set_title("fit", fontsize=7)
+    axes[0, 0].set_title("type", fontsize=7)
+    figure.suptitle(title, x=0.04, y=0.985, ha="left", fontsize=11, fontweight="bold")
+    figure.subplots_adjust(left=0.3, right=0.84, top=0.94, bottom=0.05)
+    figure.colorbar(image, cax=figure.add_axes([0.9, 0.55, 0.015, 0.25]), label="correlation", extend="both")
+    figure.colorbar(fit_image, cax=figure.add_axes([0.9, 0.2, 0.015, 0.25]),
+                    label=f"{column.split('_')[0].upper()} of the cross-correlation ({'lower' if ascending else 'higher'} is better)")
+    return figure
+
+
+def shape_map(table, observable, hat_experiment):
+    """Centre of the cross-correlation against the mean of its two flanks, one panel per group: every simulation of
+    the group in blue, all other simulations in grey; the shaded corner is the Mexican-hat shape
+    (centre positive, flanks negative); the cross is the experiment."""
+    x = table[f"center_{observable}"].to_numpy(dtype=float)
+    y = ((table[f"left_{observable}"] + table[f"right_{observable}"]) / 2).to_numpy(dtype=float)
+    reference = hat_experiment[observable]
+    ex, ey = reference["center"], (reference["left"] + reference["right"]) / 2
+    finite = np.isfinite(x) & np.isfinite(y)
+    xl = np.r_[np.nanpercentile(x[finite], [5, 95]), ex, 0]           # axes cover the central 90% of simulations
+    yl = np.r_[np.nanpercentile(y[finite], [5, 95]), ey, 0]           # and the experiment
+    pad = lambda v: (v.min() - 0.1 * np.ptp(v), v.max() + 0.1 * np.ptp(v))
+    groups = [g for g in dict.fromkeys(table["group"]) if g != "uncoupled"]
+    ncol = 3
+    figure, axes = plt.subplots(int(np.ceil(len(groups) / ncol)), ncol, figsize=(10, 3.1 * np.ceil(len(groups) / ncol) + 0.6),
+                                sharex=True, sharey=True, squeeze=False)
+    rng = np.random.default_rng(0)
+    background = np.flatnonzero(finite)
+    background = background if len(background) <= MAX_POINTS else rng.choice(background, MAX_POINTS, replace=False)
+    uncoupled = table["group"].to_numpy() == "uncoupled"
+    for axis, group in zip(axes.flat, groups):
+        (xmin, xmax), (ymin, ymax) = pad(xl), pad(yl)
+        axis.fill_between([0, xmax], ymin, 0, color="#e1e0d9", alpha=0.6, linewidth=0)
+        axis.scatter(x[background], y[background], s=3, color="#c3c2b7", alpha=0.3, linewidths=0, rasterized=True)
+        mine = np.flatnonzero((table["group"].to_numpy() == group) & finite)
+        mine = mine if len(mine) <= MAX_POINTS else rng.choice(mine, MAX_POINTS, replace=False)
+        axis.scatter(x[mine], y[mine], s=4, color=BLUE, alpha=0.25, linewidths=0, rasterized=True)
+        if uncoupled.any():
+            axis.scatter(x[uncoupled], y[uncoupled], s=30, marker="D", facecolor="white", edgecolor=INK, linewidths=1, zorder=4)
+        axis.scatter([ex], [ey], s=90, marker="X", color=INK, zorder=5)
+        axis.axhline(0, color=MUTED, linewidth=0.6)
+        axis.axvline(0, color=MUTED, linewidth=0.6)
+        axis.set_xlim(xmin, xmax)
+        axis.set_ylim(ymin, ymax)
+        axis.set_title(f"{group} ({len(np.flatnonzero(table['group'].to_numpy() == group)):,} simulations)", fontsize=9)
+        axis.tick_params(labelsize=7, colors=MUTED, labelcolor=INK)
+        for side in ("top", "right"):
+            axis.spines[side].set_visible(False)
+    for axis in axes.flat[len(groups):]:
+        axis.set_visible(False)
+    for axis in axes[-1]:
+        axis.set_xlabel(f"centre: mean within ±{HAT_CENTER_MIN} min", fontsize=8)
+    for axis in axes[:, 0]:
+        axis.set_ylabel(f"flanks: mean from {HAT_FLANKS_MIN[0]} to {HAT_FLANKS_MIN[1]} min", fontsize=8)
+    figure.suptitle("Shape of the cross-correlation: X = experiment, ◇ = uncoupled control, shaded = Mexican-hat shape "
+                    "(axes show the central 90% of simulations)",
+                    x=0.02, ha="left", fontsize=10, fontweight="bold")
+    figure.tight_layout()
+    return figure
+
+
 def metric_by_group(table, column, title, scale, reference=None):
     """One metric per model group: a violin, every simulation as a faint point, and the group median
     (black bar, value at the right). reference: the experiment's value, drawn as a dashed line."""
@@ -789,6 +915,12 @@ def main():
     if len(arguments) != 1:
         raise SystemExit(__doc__)
     config, run_dir, table, curves, experiment, experiment_on, done, fitted, hat_experiment = load(Path(arguments[0]).resolve(), profile)
+    # [report] in the config: which observables and curves to draw (default: all).
+    global CURVES, METRICS
+    observables = config.get("report", {}).get("observables", ["reporter", "binary"])
+    pairs = config.get("report", {}).get("curves", ["EG", "EE", "GG"])
+    CURVES = [curve for curve in CURVES if curve[0] in observables and curve[1] in pairs]
+    METRICS = [metric for metric in METRICS if metric[0].split("_")[1] in observables]
     table.drop(columns=["curve_row"] + BLOCKS).sort_values("rank").to_csv(run_dir / "ranked_scores.csv", index=False)
     folder = run_dir / "plots"
     folder.mkdir(exist_ok=True)
@@ -808,6 +940,24 @@ def main():
     save("Best simulations", top_curves(table, curves, experiment, experiment_on), "top_simulations", f"The {TOP_N} best simulations",
          "Every curve of each top simulation (blue, mean ± SE) against experiment (black) and the uncoupled control (grey, dashed).")
 
+    names = {"reporter": "reporter count", "binary": "ON/OFF state"}
+    for observable in [o for o in ("reporter", "binary") if o in observables]:
+        for metric, ascending in [("nrmse", True), ("ccc", False)]:
+            column = f"{metric}_{observable}_EG"
+            for top, section, what in [(None, "Best parameter set of every architecture", "every architecture"),
+                                       (TOP_ARCHITECTURES, f"Top {TOP_ARCHITECTURES} architectures", f"the {TOP_ARCHITECTURES} best architectures")]:
+                rows = best_per_architecture(table, column, ascending, top)
+                title = f"Cross-correlation, {names[observable]}: {what}, best parameter set by {metric.upper()}"
+                save(section, architecture_heatmap(title, rows, curves, experiment, observable, column, ascending),
+                     f"architectures_{'top' if top else 'all'}_{observable}_by_{metric}", title,
+                     "One row per architecture, with its best parameter set. Rows are grouped by model group and sub-type "
+                     "(left bar; neighbouring sub-types differ in colour) and sorted by fit within each sub-type, best on top. "
+                     "Right bar: the fit (darker = better). Panel heights are not to scale.")
+        save("Shape map", shape_map(table, observable, hat_experiment), f"shape_map_{observable}",
+             f"Shape of the cross-correlation, {names[observable]}",
+             "Every simulation as a point: the mean of the cross-correlation near zero lag against the mean of its two flanks. "
+             "Simulations in the shaded corner have the Mexican-hat shape. At most 50,000 points drawn per panel.")
+
     for column, title, scale in METRICS:
         reference = hat_experiment[column.split("_")[1]]["hat"] if column.startswith("hat") else None
         save("Metrics by model group", metric_by_group(table, column, title, scale, reference), f"by_group_{column}", title,
@@ -825,7 +975,7 @@ def main():
     save("Heatmaps of all model groups, by model type and parameters", on_fraction_heatmap(table, experiment_on),
          "heatmap_on_fraction", "ON fraction relative to experiment", "Rows as in the curve heatmaps.")
 
-    for observable, name in [("reporter", "reporter count"), ("binary", "ON/OFF state")]:
+    for observable, name in [(o, names[o]) for o in ("reporter", "binary") if o in observables]:
         for metric, ascending in [("nrmse", True), ("ccc", False)]:
             ordered = sorted_within_groups(table, f"{metric}_{observable}_EG", ascending)
             title = f"CCAT1 x MYC cross-correlation, {name}: sorted by {metric.upper()} within each group"
