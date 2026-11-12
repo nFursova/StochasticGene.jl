@@ -96,7 +96,7 @@ For the extensive sweep, set `mode = "extensive"` and a new `run_dir` in `config
 | `results/curves_*.csv` | steps 4, 6 | The six correlation curves of every simulation: mean, SE, and every replicate (`rep1`, `rep2`, ...) |
 | `results/metrics_*.csv` | steps 4, 6 | One row per simulation: ON fractions and mean reporters (mean, SE and every replicate), NRMSE and CCC of the six curves, base rates |
 | `results_report.html` | step 7 | Interactive explorer (pick a model, vary one parameter), summary tables, and every plot. Needs `plots/` and `explorer/` next to it |
-| (in the report) | step 7 | One row per architecture with its best parameter set (by NRMSE and by CCC): all architectures, and the top 100; rows grouped by model group and sub-type and sorted by fit, with a sub-type bar and a fit bar. A shape map: every simulation's cross-correlation centre against its flanks, per group |
+| (in the report) | step 7 | A selector at the top switches every fit-based plot and table between NRMSE, CCC and the sum of NRMSE of the three curves; a second one shows all architectures or the top 10, 100 or 200. One row per architecture with its best parameter set, rows grouped by model group and sub-type and sorted by fit, with a sub-type bar and a fit bar. A shape map: every simulation's cross-correlation centre against its flanks, per group, and heatmaps of every architecture that passes the shape thresholds (labelled, 40 per page) |
 | `plots/` | step 7 | Every plot as a PDF and a 600 dpi PNG |
 | `explorer/` | step 7 | The data the report's explorer loads when you pick a model: one small file per model (mean and SE of its curves) |
 | `ranked_scores.csv` | step 7 | Every simulation with parameters, metrics and score, best first |
@@ -159,8 +159,10 @@ NRMSE of the reporter cross-correlation by default; edit it to use any saved met
 
 The report also computes the Mexican-hat shape of each cross-correlation: its mean within ±10 min
 (`center_*`), its mean in the flanks from 20 to 60 min on each side (`left_*`, `right_*`), the depth
-`hat_*` = centre minus the mean of the flanks, and `hat_shape_*` = true when the centre is positive and
-both flanks are negative. The windows are `HAT_CENTER_MIN` and `HAT_FLANKS_MIN` at the top of the script.
+`hat_*` = centre minus the mean of the flanks, and `hat_shape_*` = true when the centre is at least 0.01 and
+each flank is at most −0.01. The windows are `HAT_CENTER_MIN` and `HAT_FLANKS_MIN`, the thresholds
+`HAT_CENTER_THRESHOLD` and `HAT_FLANK_THRESHOLD`, all at the top of the script. The architectures that pass are
+listed, each with its best passing parameter set, in `shape_selected_<observable>_by_<metric>.csv` in the run folder.
 All are columns of `ranked_scores.csv` and can be used in `score()`.
 
 `nrmse3_reporter` is the fit of all three curves: NRMSE of the cross-correlation + NRMSE of the CCAT1

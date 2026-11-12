@@ -14,7 +14,7 @@ Reads the simulation list (simulations.csv, or expanded_models.csv and expanded_
 
 Heatmap rows are simulations, grouped by model group, then model, then parameters.
 """
-import html, inspect, json, os, sys, tomllib
+import html, inspect, json, os, sys, textwrap, tomllib
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import numpy as np
@@ -26,11 +26,21 @@ from matplotlib.colors import LinearSegmentedColormap
 
 PLOT_MAX_LAG_MIN = 120      # lag range shown in every plot
 TOP_N = 10                  # number of best simulations shown as line plots and in the table
-TOP_ARCHITECTURES = 100     # number of architectures on the "top architectures" pages
+TOP_ARCHITECTURES = (10, 100, 200)  # choices in the architecture-heatmap selector; "all" is also available
 PNG_DPI = 600
 A4 = (8.27, 11.69)          # page size of the heatmaps, inches
 HAT_CENTER_MIN = 10         # Mexican-hat shape: the cross-correlation should be positive within +/- this many minutes
 HAT_FLANKS_MIN = (20, 60)   # and negative between these lags (minutes) on both sides
+HAT_CENTER_THRESHOLD = 0.01
+HAT_FLANK_THRESHOLD = -0.01           # EACH flank must pass, not only their average
+HAT_MODELS_PER_PAGE = 40              # every qualifying architecture is labelled; no models are dropped
+FIT_METRICS = (("nrmse", True), ("ccc", False), ("nrmse3", True))   # (metric, lower is better); nrmse3 = sum of 3 NRMSEs
+FIT_NAMES = {"nrmse": "NRMSE", "ccc": "CCC", "nrmse3": "sum of NRMSE (3 curves)"}
+
+
+def fit_column(metric, observable, pair="EG"):
+    """Column of a fit metric: NRMSE or CCC of one curve, or nrmse3 = NRMSE of EG + EE + GG of the observable."""
+    return f"nrmse3_{observable}" if metric == "nrmse3" else f"{metric}_{observable}_{pair}"
 
 SCORE_NAME = "NRMSE of the reporter-count cross-correlation"
 MAX_POINTS = 50_000         # scatter plots draw at most this many randomly chosen points per row (medians use all)
@@ -47,7 +57,7 @@ def score(metrics):
         center_<observable>, left_<observable>, right_<observable>   mean cross-correlation within +/- HAT_CENTER_MIN
                                     and in the left and right flanks (HAT_FLANKS_MIN)
         hat_<observable>            Mexican-hat depth: center minus the mean of the two flanks
-        hat_shape_<observable>      True if center > 0 and both flanks < 0
+        hat_shape_<observable>      True if center >= 0.025 and each flank <= -0.025 (thresholds above)
     observable: binary (ON/OFF state) or reporter (reporter count)
     pair:       EG (CCAT1 x MYC cross-correlation), EE (CCAT1 autocorrelation), GG (MYC autocorrelation)
     Example of a combined score:  metrics["nrmse_reporter_EG"] + metrics["nrmse_binary_EG"]
@@ -61,7 +71,8 @@ CURVES = [(observable, pair, f"{pair_name}, {observable_name}")
           for observable, observable_name in [("binary", "ON/OFF state"), ("reporter", "reporter count")]]
 # The metrics drawn per model group (violins) and against every swept parameter: (column, title, axis scale).
 # nrmse3_<observable>: NRMSE of the cross-correlation + CCAT1 autocorrelation + MYC autocorrelation (added in load).
-METRICS = [("nrmse3_reporter", "Sum of NRMSE of the cross-correlation and both autocorrelations, reporter count", "log")] + \
+METRICS = [(f"nrmse3_{observable}", f"Sum of NRMSE of the cross-correlation and both autocorrelations, {observable_name}", "log")
+           for observable, observable_name in [("reporter", "reporter count"), ("binary", "ON/OFF state")]] + \
           [(f"{name}_{observable}{pair}", f"{title}, {observable_name}", scale)
            for observable, observable_name in [("reporter", "reporter count"), ("binary", "ON/OFF state")]
            for name, pair, title, scale in [
@@ -256,7 +267,8 @@ def add_hat_metrics(table, curves, experiment):
             table[f"{name}_{observable}"] = np.nanmean(simulated[:, window], axis=1)
         center, left, right = (table[f"{name}_{observable}"] for name in windows)
         table[f"hat_{observable}"] = center - (left + right) / 2
-        table[f"hat_shape_{observable}"] = (center > 0) & (left < 0) & (right < 0)
+        table[f"hat_shape_{observable}"] = ((center >= HAT_CENTER_THRESHOLD) &
+                                            (left <= HAT_FLANK_THRESHOLD) & (right <= HAT_FLANK_THRESHOLD))
         reference[observable] = {name: float(np.nanmean(target[window])) for name, window in windows.items()}
         reference[observable]["hat"] = reference[observable]["center"] - (reference[observable]["left"] + reference[observable]["right"]) / 2
     return reference
@@ -358,16 +370,23 @@ def panel_marks(levels, height):
     return lines, names
 
 
-def heatmap_figure(title, panels, x_edges, limit, colorbar_label, column_titles=("",), x_label="", x_ticks=None):
-    """An A4 page of heatmap panels stacked vertically, with one or more columns.
+def group_heights(counts):
+    """Group heights in inches, increasing with sqrt(row count), with a readable minimum and a 7.5-inch cap."""
+    scale = min(0.16, 7.5 / np.sqrt(max(counts)))
+    return [max(0.30, scale * np.sqrt(count)) for count in counts]
+
+
+def heatmap_figure(title, panels, x_edges, limit, colorbar_label, column_titles=("",), x_label="", x_ticks=None, figsize=None):
+    """Content-sized heatmap panels stacked vertically, with one or more columns.
 
     panels: dictionaries with label, height (relative), arrays (one [row, heatmap column] array per column) and
     optionally levels (per column, the block names of the rows from coarse to fine; see panel_marks).
     Blocks are separated by thin white lines in every column and named beside the first column."""
-    figure, axes = plt.subplots(len(panels), len(column_titles), figsize=A4, squeeze=False,
+    figsize = figsize or (A4[0], max(2.6, 0.9 + sum(p["height"] for p in panels) + 0.09 * (len(panels) - 1)))
+    figure, axes = plt.subplots(len(panels), len(column_titles), figsize=figsize, squeeze=False,
                                 gridspec_kw=dict(height_ratios=[panel["height"] for panel in panels], hspace=0.07,
                                                  wspace=0.18 if len(column_titles) > 1 else 0.05))
-    points = 72 * A4[1] * 0.9 * 0.93 / sum(panel["height"] for panel in panels)        # height of one unit, in points
+    points = 72 * (figsize[1] - 0.9) * 0.93 / sum(panel["height"] for panel in panels)
     for i, panel in enumerate(panels):
         for j, values in enumerate(panel["arrays"]):
             axis = axes[i, j]
@@ -398,21 +417,25 @@ def heatmap_figure(title, panels, x_edges, limit, colorbar_label, column_titles=
         axis.set_title(text, fontsize=6.5)
     for axis in axes[-1]:
         axis.set_xlabel(x_label, fontsize=8)
-    figure.suptitle(title, x=0.04, y=0.985, ha="left", fontsize=11, fontweight="bold")
-    figure.subplots_adjust(left=0.3, right=0.87, top=0.93 if len(column_titles) > 1 else 0.95, bottom=0.05)
-    figure.colorbar(image, cax=figure.add_axes([0.9, 0.35, 0.015, 0.3]), label=colorbar_label, extend="both")
+    figure.suptitle(textwrap.fill(title, 105), x=0.04, y=0.985, ha="left", fontsize=10, fontweight="bold")
+    figure.subplots_adjust(left=0.3, right=0.87, top=1 - 0.65 / figsize[1], bottom=0.42 / figsize[1])
+    colorbar = figure.colorbar(image, cax=figure.add_axes([0.9, 0.28, 0.015, 0.42]), extend="both")
+    colorbar.set_label(colorbar_label, fontsize=7)
+    colorbar.ax.tick_params(labelsize=7)
     return figure
 
 
 def overview_heatmap(title, table, values, x_edges, limit, colorbar_label, top_row=None, blocks=True, **options):
     """Every model group on one page, rows in the order of `table` (values = array [simulation, heatmap column]).
-    A panel of 1 simulation is as high as the experiment strip; bigger groups are higher, but not to scale.
+    Small groups take less space; heights grow with row counts using a compressed square-root scale.
     blocks: separate and name the model types (only meaningful when `table` is in display order)."""
-    panels = [] if top_row is None else [dict(label="experiment", height=1, arrays=[top_row[None, :]])]
-    for group in dict.fromkeys(table["group"]):
+    panels = [] if top_row is None else [dict(label="experiment", height=0.18, arrays=[top_row[None, :]])]
+    groups = list(dict.fromkeys(table["group"]))
+    heights = group_heights([int((table["group"] == group).sum()) for group in groups])
+    for group, height in zip(groups, heights):
         inside = (table["group"] == group).to_numpy()
         count = int(inside.sum())
-        panels.append(dict(label=f"{group}\n{count:,} simulation{'s' * (count > 1)}", height=1 + 2 * np.log10(count),
+        panels.append(dict(label=f"{group}\n{count:,} simulation{'s' * (count > 1)}", height=height,
                            arrays=[values[inside]],
                            levels=[[table[name].to_numpy()[inside] for name in BLOCKS]] if blocks else None))
     return heatmap_figure(title, panels, x_edges, limit, colorbar_label, **options)
@@ -428,23 +451,21 @@ def curve_heatmap(table, curves, experiment, observable, pair, title, blocks=Tru
                             x_label="lag (min); positive = MYC after CCAT1" if pair == "EG" else "lag (min)")
 
 
-def group_heatmap(table, curves, experiment, group, observable, pair, title):
-    """One curve of one model group on a full page, in three columns: in parameter order (model types separated and
-    named), and sorted by NRMSE and by CCC within each model type (best on top)."""
+def group_heatmap(table, curves, experiment, group, observable, pair, title, metric="nrmse"):
+    """Parameter order beside ordering by the selected fit metric within each model type."""
     rows, lag_frames, lags = curves.rows(observable, pair)
     target, _ = experiment_curve(experiment, observable, pair, lag_frames)
     part = table[table["group"] == group]
     part = part.assign(model_order=pd.factorize(part["model_id"])[0])            # model types in display order
-    by_nrmse = part.sort_values(["model_order", f"nrmse_{observable}_{pair}"])
-    by_ccc = part.sort_values(["model_order", f"ccc_{observable}_{pair}"], ascending=[True, False])
+    by_fit = part.sort_values(["model_order", fit_column(metric, observable, pair)], ascending=[True, metric != "ccc"])
     model_blocks = lambda ordered: [ordered["model_id"].to_numpy()]
-    panels = [dict(label="experiment", height=1, arrays=[target[None, :]] * 3),
-              dict(label="", height=45, arrays=[mean_curves(curves, ordered, rows) for ordered in (part, by_nrmse, by_ccc)],
-                   levels=[[part[name].to_numpy() for name in BLOCKS], model_blocks(by_nrmse), model_blocks(by_ccc)])]
+    panels = [dict(label="experiment", height=0.18, arrays=[target[None, :]] * 2),
+              dict(label="", height=max(4.0, group_heights([len(part)])[0]),
+                   arrays=[mean_curves(curves, ordered, rows) for ordered in (part, by_fit)],
+                   levels=[[part[name].to_numpy() for name in BLOCKS], model_blocks(by_fit)])]
     return heatmap_figure(title, panels, bin_edges(lags), 2 * np.nanmax(np.abs(target)), "correlation (blue negative, red positive)",
                           column_titles=["in parameter order\n(hidden rates, then fold;\nsmallest on top)",
-                                         "each model type\nsorted by NRMSE\n(best on top)",
-                                         "each model type\nsorted by CCC\n(best on top)"], x_label="lag (min)")
+                                         f"each model type\nsorted by {FIT_NAMES[metric]}\n(best on top)"], x_label="lag (min)")
 
 
 def on_fraction_heatmap(table, experiment_on):
@@ -454,22 +475,30 @@ def on_fraction_heatmap(table, experiment_on):
              f'MYC {experiment_on["on_MYC"]:.3f})')
     return overview_heatmap(title, table, ratio, np.array([0.0, 1.0, 2.0]), limit,
                             "log2(simulated / experimental); 0 = equal, +1 = twice as often ON",
-                            x_ticks=([0.5, 1.5], ["CCAT1 (E)", "MYC (G)"]))
+                            x_ticks=([0.5, 1.5], ["CCAT1 (E)", "MYC (G)"]), figsize=(A4[0], 3.8))
 
 
-def top_curves(table, curves, experiment, experiment_on):
+def top_curves(table, curves, experiment, experiment_on, metric="nrmse"):
     """The TOP_N best simulations: every curve against experiment and the uncoupled control, one row per simulation."""
-    best = table.sort_values("rank").head(TOP_N)
+    fit = fit_column(metric, "reporter")
+    best = table.loc[np.isfinite(table[fit])].sort_values(fit, ascending=metric != "ccc", kind="stable").head(TOP_N)
+    if best.empty:
+        return empty_figure(f"No finite {FIT_NAMES[metric]} values for the top simulations")
     control = table.loc[table["group"] == "uncoupled", "curve_row"]
-    figure, axes = plt.subplots(len(best), len(CURVES), figsize=(15, 1.25 * len(best) + 1.4), sharex=True, sharey="col",
+    cell, gap_x, gap_y, left = 1.8, 0.42, 0.38, 3.6
+    width = left + cell * len(CURVES) + gap_x * (len(CURVES) - 1) + 0.25
+    height = cell * len(best) + gap_y * (len(best) - 1) + 1.3
+    figure, axes = plt.subplots(len(best), len(CURVES), figsize=(width, height), sharex=True, sharey="col",
                                 squeeze=False)
     for row, (_, sim) in enumerate(best.iterrows()):
-        label = (f'#{sim["rank"]}  simulation {sim["sim_id"]}  score {sim["score"]:.3f}\n{sim["model_id"]}\n{parameter_text(sim)}\n'
+        label = (f'#{row + 1}  simulation {sim["sim_id"]}  {FIT_NAMES[metric]} {sim[fit]:.3f}\n'
+                 f'{textwrap.fill(sim["model_id"], 55)}\n{textwrap.fill(parameter_text(sim), 55)}\n'
                  f'ON: CCAT1 {sim["on_E"]:.3f} (exp. {experiment_on["on_CCAT1"]:.3f}), '
                  f'MYC {sim["on_G"]:.3f} (exp. {experiment_on["on_MYC"]:.3f})')
         axes[row, 0].set_ylabel(label, rotation=0, ha="right", va="center", fontsize=6.5)
         for column, (observable, pair, name) in enumerate(CURVES):
             axis = axes[row, column]
+            axis.set_box_aspect(1)                         # square plotting box; preserve the data scales
             rows, lag_frames, lags = curves.rows(observable, pair)
             simulated = curves.values[sim["curve_row"], rows, :]            # [lag, column]: mean, se, rep1, rep2, ...
             if len(control):
@@ -485,21 +514,25 @@ def top_curves(table, curves, experiment, experiment_on):
             for side in ("top", "right"):
                 axis.spines[side].set_visible(False)
             if row == 0:
-                axis.set_title(name, fontsize=7.5)
+                axis.set_title(textwrap.fill(name, 35), fontsize=7.5)
             if row == len(best) - 1:
                 axis.set_xlabel("lag (min)", fontsize=7.5)
     handles, labels = axes[0, 0].get_legend_handles_labels()
-    figure.legend(handles, labels, loc="upper right", ncol=3, frameon=False, fontsize=8)
-    figure.suptitle(f"The {len(best)} best simulations (lowest score)", x=0.02, ha="left", fontsize=11, fontweight="bold")
-    height = figure.get_figheight()
-    figure.subplots_adjust(left=0.2, right=0.99, top=1 - 0.8 / height, bottom=0.5 / height, wspace=0.24, hspace=0.28)
+    figure.legend(handles, labels, loc="upper right", bbox_to_anchor=(1 - 0.25 / width, 1 - 0.27 / height),
+                  ncol=3, frameon=False, fontsize=7)
+    figure.suptitle(f"The {len(best)} best simulations by {FIT_NAMES[metric]} (reporter count)",
+                   x=0.02, y=0.99, ha="left", fontsize=10, fontweight="bold")
+    figure.subplots_adjust(left=left / width, right=1 - 0.25 / width, top=1 - 0.8 / height,
+                           bottom=0.5 / height, wspace=gap_x / cell, hspace=gap_y / cell)
     return figure
 
 
 def best_per_architecture(table, column, ascending, top=None):
     """The best parameter set of every architecture (model_id) by `column`, optionally only the `top` best
     architectures; ordered by group and sub-type as in `table` (display order), then by fit, best first."""
-    best = table.sort_values(column, ascending=ascending, na_position="last").drop_duplicates("model_id")
+    best = table.loc[np.isfinite(table[column])].sort_values(column, ascending=ascending, kind="stable").drop_duplicates("model_id")
+    if best.empty:
+        return best
     if top is not None:
         best = best.head(top)
     group_rank = {group: i for i, group in enumerate(dict.fromkeys(table["group"]))}
@@ -509,26 +542,49 @@ def best_per_architecture(table, column, ascending, top=None):
             .drop(columns=["group_rank", "type_rank"]))
 
 
-def architecture_heatmap(title, rows, curves, experiment, observable, column, ascending, pairs=("EG",)):
-    """One row per architecture (its best parameter set), all groups on one A4 page.
+def empty_figure(message):
+    figure, axis = plt.subplots(figsize=(A4[0], 2.0))
+    axis.set_axis_off()
+    axis.text(0.5, 0.5, textwrap.fill(message, 85), ha="center", va="center", transform=axis.transAxes, fontsize=11)
+    return figure
+
+
+def architecture_heatmap(title, rows, curves, experiment, observable, column, ascending, annotate_models=False, compact=False,
+                         pairs=("EG",)):
+    """One row per architecture (its best parameter set), with compact, count-aware group heights.
     Left bar: model sub-type (neighbouring sub-types differ in colour; names where they fit). Middle: one column per
-    curve in `pairs`, each with its own colour scale. Right bar: the fit of the row (darker = better)."""
+    curve in `pairs` (cross-correlation by default), each with its own colour scale. Right bar: the fit of the row
+    (darker = better)."""
+    if rows.empty:
+        return empty_figure(f"{title}\nNo architectures have a qualifying parameter set and a finite selected fit metric.")
     titles = {"EG": "CCAT1 x MYC\ncross-correlation", "EE": "CCAT1\nautocorrelation", "GG": "MYC\nautocorrelation"}
     panels = []                                         # per curve: lag edges, experiment, simulated rows, colour limit
     for pair in pairs:
         lag_rows, lag_frames, lags = curves.rows(observable, pair)
         target, _ = experiment_curve(experiment, observable, pair, lag_frames)
         panels.append((bin_edges(lags), target, mean_curves(curves, rows, lag_rows), 2 * np.nanmax(np.abs(target))))
+    n = len(pairs)
     fit = rows[column].to_numpy(dtype=float)
     low, high = np.nanpercentile(fit, [2, 98]) if np.isfinite(fit).any() else (0, 1)
+    if low == high:
+        low, high = low - 0.05, high + 0.05
     groups = list(dict.fromkeys(rows["group"]))
     counts = [int((rows["group"] == group).sum()) for group in groups]
-    n = len(pairs)
-    figure, axes = plt.subplots(len(groups) + 1, n + 2, figsize=A4, squeeze=False,
+    labels = {group: [textwrap.fill(str(name), 68) for name in rows.loc[rows["group"] == group, "model_id"]] for group in groups}
+    if annotate_models:                                 # one labelled row per model: heights in inches
+        strip = 0.18
+        heights = [count * (0.13 * max(label.count("\n") + 1 for label in labels[group]) + 0.04)
+                   for group, count in zip(groups, counts)]
+        figsize = (12.0, max(3.0, 1.2 + sum(heights) + 0.08 * len(groups)))
+    else:                                               # group heights grow with log10(row count); small groups stay small
+        strip = 0.6
+        heights = [0.5 + 2 * np.log10(count) for count in counts]
+        figsize = (A4[0], A4[1] * (0.36 if compact else 0.85))   # top-N views: about a third of an A4 page
+    figure, axes = plt.subplots(len(groups) + 1, n + 2, figsize=figsize, squeeze=False,
                                 gridspec_kw=dict(width_ratios=[0.035 * n] + [1] * n + [0.035 * n], wspace=0.03 + 0.1 * (n > 1),
-                                                 hspace=0.07, height_ratios=[1] + [1 + 2 * np.log10(count) for count in counts]))
-    points = 72 * A4[1] * 0.9 * 0.93 / (1 + sum(1 + 2 * np.log10(count) for count in counts))
-    for axis in axes.flat:                              # no ticks except the lag axes and the sub-type names set below
+                                                 hspace=0.07, height_ratios=[strip] + heights))
+    points = 72 * (figsize[1] - 0.9) * 0.93 / (strip + sum(heights))
+    for axis in axes.flat:                              # no ticks except the lag axis and the sub-type names set below
         axis.set_yticks([])
         axis.set_xticks([])
         for spine in axis.spines.values():
@@ -536,17 +592,18 @@ def architecture_heatmap(title, rows, curves, experiment, observable, column, as
     images = []
     for j, (x_edges, target, _, limit) in enumerate(panels, start=1):
         images.append(axes[0, j].pcolorfast(x_edges, [0, 1], np.ma.masked_invalid(target[None, :]), cmap=DIVERGING, vmin=-limit, vmax=limit))
-        axes[0, j].set_title(titles[pairs[j - 1]], fontsize=7)
+        if n > 1:
+            axes[0, j].set_title(titles[pairs[j - 1]], fontsize=7)
     axes[0, 0].set_ylabel("experiment", rotation=0, ha="right", va="center", fontsize=8, fontweight="bold")
-    colors = matplotlib.colors.ListedColormap(TYPE_COLORS)
     for i, (group, count) in enumerate(zip(groups, counts), start=1):
         inside = (rows["group"] == group).to_numpy()
         types = rows["block1"].to_numpy()[inside]
         starts, names = blocks_at([types], 0)
         number = np.cumsum(np.r_[True, types[1:] != types[:-1]]) - 1                   # sub-type number of every row
+        colors = matplotlib.colors.ListedColormap(TYPE_COLORS)
         axes[i, 0].pcolorfast([0, 1], np.arange(count + 1), (number % len(TYPE_COLORS))[:, None], cmap=colors,
                               vmin=-0.5, vmax=len(TYPE_COLORS) - 0.5)
-        height = (1 + 2 * np.log10(count)) * points
+        height = heights[i - 1] * points
         for j, (x_edges, _, values, limit) in enumerate(panels, start=1):
             axes[i, j].pcolorfast(x_edges, np.arange(count + 1), np.ma.masked_invalid(values[inside]),
                                   cmap=DIVERGING, vmin=-limit, vmax=limit)
@@ -554,11 +611,15 @@ def architecture_heatmap(title, rows, curves, experiment, observable, column, as
                 axes[i, j].hlines(starts[1:], x_edges[0], x_edges[-1], color="white", linewidth=0.5)
         fit_image = axes[i, -1].pcolorfast([0, 1], np.arange(count + 1), np.ma.masked_invalid(fit[inside][:, None]),
                                            cmap=FIT_COLORS if not ascending else FIT_COLORS.reversed(), vmin=low, vmax=high)
-        if len(starts) <= height / 5:                    # sub-type names, where they fit
+        if annotate_models:
+            axes[i, 0].set_yticks(np.arange(count) + 0.5, labels[group], fontsize=6.0)
+            axes[i, 0].tick_params(axis="y", length=0, pad=4)
+        elif len(starts) <= height / 5:                 # sub-type names, where they fit
             axes[i, 0].set_yticks((starts + np.r_[starts[1:], count]) / 2, list(names), fontsize=min(6.0, 0.8 * height / len(starts)))
             axes[i, 0].tick_params(axis="y", length=0, pad=2)
-        axes[i, 0].set_ylabel(f"{group}\n{count:,} architecture{'s' * (count > 1)}", rotation=0, ha="right", va="center",
-                              fontsize=8, labelpad=48 if len(starts) <= height / 5 else 4)
+        if not annotate_models:
+            axes[i, 0].set_ylabel(f"{group}\n{count:,} architecture{'s' * (count > 1)}", rotation=0, ha="right", va="center",
+                                  fontsize=8, labelpad=48 if len(starts) <= height / 5 else 4)
     for axis in axes.flat:
         axis.invert_yaxis()
     for j, (x_edges, *_rest) in enumerate(panels, start=1):
@@ -569,35 +630,44 @@ def architecture_heatmap(title, rows, curves, experiment, observable, column, as
     axes[0, -1].set_title("fit", fontsize=7)
     if n == 1:
         axes[0, 0].set_title("type", fontsize=7)
-    figure.suptitle(title, x=0.04, y=0.985, ha="left", fontsize=11, fontweight="bold")
-    figure.subplots_adjust(left=0.3, right=0.84, top=0.94, bottom=0.05 + 0.03 * (n > 1))
+    figure.suptitle(textwrap.fill(title, 140 if annotate_models else 100), x=0.03, y=0.985, ha="left", fontsize=10, fontweight="bold")
+    figure.subplots_adjust(left=0.47 if annotate_models else 0.3, right=0.85, top=1 - 0.68 / figsize[1],
+                           bottom=(0.42 + 0.42 * (n > 1)) / figsize[1])
+    fit_name = "sum of NRMSE" if column.startswith("nrmse3") else column.split("_")[0].upper()
+    bars = [(fit_image, [0.90, 0.19, 0.014, 0.23], f"{fit_name} ({'lower' if ascending else 'higher'} is better)")]
     if n == 1:
-        figure.colorbar(images[0], cax=figure.add_axes([0.9, 0.55, 0.015, 0.25]), label="correlation", extend="both")
+        bars.insert(0, (images[0], [0.90, 0.55, 0.014, 0.23], "correlation"))
     else:                                               # one small colour bar under each curve
         for j, image in enumerate(images, start=1):
             box = axes[-1, j].get_position()
-            figure.colorbar(image, cax=figure.add_axes([box.x0, 0.02, box.width, 0.008]), orientation="horizontal", extend="both")
-            figure.axes[-1].tick_params(labelsize=6)
-    fit_name = ("sum of NRMSE of the three curves" if column.startswith("nrmse3") else
-                f"{column.split('_')[0].upper()} of the cross-correlation")
-    figure.colorbar(fit_image, cax=figure.add_axes([0.9, 0.2, 0.015, 0.25]),
-                    label=f"{fit_name} ({'lower' if ascending else 'higher'} is better)")
+            bar = figure.colorbar(image, cax=figure.add_axes([box.x0, 0.22 / figsize[1], box.width, 0.06 / figsize[1]]),
+                                  orientation="horizontal", extend="both")
+            bar.ax.tick_params(labelsize=6)
+    for artist, rectangle, label in bars:
+        colorbar = figure.colorbar(artist, cax=figure.add_axes(rectangle))
+        colorbar.set_label(label, fontsize=7)
+        colorbar.ax.tick_params(labelsize=6)
     return figure
 
 
 def shape_map(table, observable, hat_experiment):
     """Centre of the cross-correlation against the mean of its two flanks, one panel per group: every simulation of
-    the group in blue, all other simulations in grey; the shaded corner is the Mexican-hat shape
-    (centre positive, flanks negative); the cross is the experiment."""
+    the group in blue, the whole sweep in grey. Shading thresholds centre and mean flank; the qualifying
+    heatmap additionally requires each individual flank to pass. The cross is the experiment."""
     x = table[f"center_{observable}"].to_numpy(dtype=float)
     y = ((table[f"left_{observable}"] + table[f"right_{observable}"]) / 2).to_numpy(dtype=float)
     reference = hat_experiment[observable]
     ex, ey = reference["center"], (reference["left"] + reference["right"]) / 2
     finite = np.isfinite(x) & np.isfinite(y)
-    xl = np.r_[np.nanpercentile(x[finite], [5, 95]), ex, 0]           # axes cover the central 90% of simulations
-    yl = np.r_[np.nanpercentile(y[finite], [5, 95]), ey, 0]           # and the experiment
-    pad = lambda v: (v.min() - 0.1 * np.ptp(v), v.max() + 0.1 * np.ptp(v))
+    if not finite.any():
+        return empty_figure("No finite centre/flank values for the shape map")
+    xl = np.r_[np.nanpercentile(x[finite], [5, 95]), ex, 0, HAT_CENTER_THRESHOLD]
+    yl = np.r_[np.nanpercentile(y[finite], [5, 95]), ey, 0, HAT_FLANK_THRESHOLD]
+    pad = lambda v: (np.nanmin(v) - 0.1 * max(np.nanmax(v) - np.nanmin(v), 0.05),
+                     np.nanmax(v) + 0.1 * max(np.nanmax(v) - np.nanmin(v), 0.05))
     groups = [g for g in dict.fromkeys(table["group"]) if g != "uncoupled"]
+    if not groups:
+        return empty_figure("The shape map needs at least one coupled-model group")
     ncol = 3
     figure, axes = plt.subplots(int(np.ceil(len(groups) / ncol)), ncol, figsize=(10, 3.1 * np.ceil(len(groups) / ncol) + 0.6),
                                 sharex=True, sharey=True, squeeze=False)
@@ -607,7 +677,7 @@ def shape_map(table, observable, hat_experiment):
     uncoupled = table["group"].to_numpy() == "uncoupled"
     for axis, group in zip(axes.flat, groups):
         (xmin, xmax), (ymin, ymax) = pad(xl), pad(yl)
-        axis.fill_between([0, xmax], ymin, 0, color="#e1e0d9", alpha=0.6, linewidth=0)
+        axis.fill_between([HAT_CENTER_THRESHOLD, xmax], ymin, HAT_FLANK_THRESHOLD, color="#e1e0d9", alpha=0.6, linewidth=0)
         axis.scatter(x[background], y[background], s=3, color="#c3c2b7", alpha=0.3, linewidths=0, rasterized=True)
         mine = np.flatnonzero((table["group"].to_numpy() == group) & finite)
         mine = mine if len(mine) <= MAX_POINTS else rng.choice(mine, MAX_POINTS, replace=False)
@@ -617,6 +687,8 @@ def shape_map(table, observable, hat_experiment):
         axis.scatter([ex], [ey], s=90, marker="X", color=INK, zorder=5)
         axis.axhline(0, color=MUTED, linewidth=0.6)
         axis.axvline(0, color=MUTED, linewidth=0.6)
+        axis.axvline(HAT_CENTER_THRESHOLD, color=INK, linewidth=0.7, linestyle="--", alpha=0.6)
+        axis.axhline(HAT_FLANK_THRESHOLD, color=INK, linewidth=0.7, linestyle="--", alpha=0.6)
         axis.set_xlim(xmin, xmax)
         axis.set_ylim(ymin, ymax)
         axis.set_title(f"{group} ({len(np.flatnonzero(table['group'].to_numpy() == group)):,} simulations)", fontsize=9)
@@ -629,10 +701,10 @@ def shape_map(table, observable, hat_experiment):
         axis.set_xlabel(f"centre: mean within ±{HAT_CENTER_MIN} min", fontsize=8)
     for axis in axes[:, 0]:
         axis.set_ylabel(f"flanks: mean from {HAT_FLANKS_MIN[0]} to {HAT_FLANKS_MIN[1]} min", fontsize=8)
-    figure.suptitle("Shape of the cross-correlation: X = experiment, ◇ = uncoupled control, shaded = Mexican-hat shape "
-                    "(axes show the central 90% of simulations)",
-                    x=0.02, ha="left", fontsize=10, fontweight="bold")
-    figure.tight_layout()
+    figure.suptitle(f"Blue = named family; grey = full sweep; X = experiment; ◇ = uncoupled\n"
+                   f"Shaded: centre ≥ {HAT_CENTER_THRESHOLD:g}, mean flanks ≤ {HAT_FLANK_THRESHOLD:g}; axes show central 90%",
+                   x=0.02, y=0.995, ha="left", fontsize=9, fontweight="bold")
+    figure.tight_layout(rect=(0, 0, 1, 0.93))
     return figure
 
 
@@ -722,26 +794,29 @@ def table_html(header, rows):
     return '<div class="scroll"><table>' + row_html(header, "th") + "".join(row_html(row, "td") for row in rows) + "</table></div>"
 
 
-def group_summary(table):
+def group_summary(table, metric="nrmse"):
     rows = []
+    column = fit_column(metric, "reporter")
     for group in dict.fromkeys(table["group"]):
         part = table[table["group"] == group]
-        best = part.loc[part["score"].idxmin()]
-        rows.append([group, f"{len(part):,}", f'{best["score"]:.3f}', f'{part["score"].median():.3f}',
-                     f'{part["ccc_reporter_EG"].median():.3f}',
+        finite = part.loc[np.isfinite(part[column])].sort_values(column, ascending=metric != "ccc", kind="stable")
+        best = finite.iloc[0] if len(finite) else None
+        rows.append([group, f"{len(part):,}", f'{best[column]:.3f}' if best is not None else "n/a", f'{part[column].median():.3f}',
                      f'{int(part["hat_shape_reporter"].sum()):,} ({100 * part["hat_shape_reporter"].mean():.0f}%)',
-                     f'simulation {best["sim_id"]}: {best["model_id"]}; {parameter_text(best)}'])
-    return table_html(["Group", "Simulations", "Best score", "Median score", "Median CCC (x-corr, reporter)",
-                       "With Mexican-hat shape (x-corr, reporter)", "Best simulation"], rows)
+                     f'simulation {best["sim_id"]}: {best["model_id"]}; {parameter_text(best)}' if best is not None else "n/a"])
+    return table_html(["Group", "Simulations", f"Best {FIT_NAMES[metric]}", f"Median {FIT_NAMES[metric]}",
+                       "Passing centre and both-flank thresholds (reporter)", "Best simulation"], rows)
 
 
-def top_table(table, experiment_on, hat_experiment):
-    rows = [[sim["rank"], sim["sim_id"], sim["model_id"], parameter_text(sim), f'{sim["score"]:.3f}',
-             f'{sim["nrmse_binary_EG"]:.3f} / {sim["ccc_binary_EG"]:.3f}', f'{sim["nrmse_reporter_EG"]:.3f} / {sim["ccc_reporter_EG"]:.3f}',
+def top_table(table, experiment_on, hat_experiment, metric="nrmse"):
+    column = fit_column(metric, "reporter")
+    best = table.loc[np.isfinite(table[column])].sort_values(column, ascending=metric != "ccc", kind="stable").head(TOP_N)
+    rows = [[rank, sim["sim_id"], sim["model_id"], parameter_text(sim),
+             f'{sim[fit_column(metric, "binary")]:.3f}', f'{sim[column]:.3f}',
              f'{sim["hat_reporter"]:.3f} ({"yes" if sim["hat_shape_reporter"] else "no"})',
-             f'{sim["on_E"]:.3f}', f'{sim["on_G"]:.3f}'] for _, sim in table.sort_values("rank").head(TOP_N).iterrows()]
-    return table_html(["Rank", "Simulation", "Model", "Parameters", "Score", "x-corr state NRMSE / CCC",
-                       "x-corr reporter NRMSE / CCC", f'Hat depth, reporter (exp. {hat_experiment["reporter"]["hat"]:.3f}); shape?',
+             f'{sim["on_E"]:.3f}', f'{sim["on_G"]:.3f}'] for rank, (_, sim) in enumerate(best.iterrows(), 1)]
+    return table_html(["Rank", "Simulation", "Model", "Parameters", f"ON/OFF state {FIT_NAMES[metric]}",
+                       f"reporter {FIT_NAMES[metric]}", f'Hat depth, reporter (exp. {hat_experiment["reporter"]["hat"]:.3f}); passes?',
                        f'ON CCAT1 (exp. {experiment_on["on_CCAT1"]:.3f})', f'ON MYC (exp. {experiment_on["on_MYC"]:.3f})'], rows)
 
 
@@ -766,6 +841,8 @@ def write_explorer(run_dir, table, curves, experiment, fitted, matching):
         means, errors = json_ready(values[..., 0]), json_ready(np.nan_to_num(values[..., 1]))
         return [dict(id=int(sim["sim_id"]), par={name: sim[name] for name in PARAMETERS if sim[name] == sim[name]},
                      nrmse=json_ready([sim[f"nrmse_{observable}_{pair}"] for observable, pair, _ in CURVES]),
+                     ccc=json_ready([sim[f"ccc_{observable}_{pair}"] for observable, pair, _ in CURVES]),
+                     nrmse3=json_ready([sim[f"nrmse3_{observable}"] for observable, pair, _ in CURVES]),
                      base=[float(f"{sim[column]:.4g}") for column in BASE_COLUMNS], curves=mean, se=error)
                 for sim, mean, error in zip(rows.to_dict("records"), means, errors)]
 
@@ -779,7 +856,8 @@ def write_explorer(run_dir, table, curves, experiment, fitted, matching):
     return dict(curve_names=[name for _, _, name in CURVES], lags=json_ready(curves.rows(*CURVES[0][:2])[2]),
                 experiment=[json_ready(mean) for mean, _ in targets], experiment_se=[json_ready(se) for _, se in targets],
                 models=models, control=simulations(control)[0] if len(control) else None, fitted=fitted,
-                state_average=matching == "state_average")
+                state_average=matching == "state_average",
+                default_curve=next((i for i, (obs, pair, _) in enumerate(CURVES) if obs == "reporter" and pair == "EG"), 0))
 
 
 STYLE = """
@@ -796,6 +874,8 @@ th{color:var(--ink2)} figure{margin:0} figure img{width:100%;height:auto;backgro
 select{font:inherit;font-size:14px;padding:5px 6px;max-width:340px;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:6px}
 #chart{width:100%;height:auto;display:block} #chart text{font:12px system-ui,sans-serif;fill:var(--ink2)}
 #legend{display:flex;flex-wrap:wrap;gap:4px 18px;font-size:13px;margin-top:6px} #legend i{display:inline-block;width:22px;height:3px;vertical-align:middle;margin-right:6px}
+[hidden]{display:none!important}.report-controls{position:sticky;top:0;z-index:10;background:var(--card);box-shadow:0 2px 8px #0001}
+.plot-variant img{display:block}.page-control{margin-bottom:10px}.metric-view{overflow-x:auto}
 """
 
 # The interactive explorer: choose a curve, a model and the parameter to vary; the other parameters are held fixed.
@@ -842,6 +922,7 @@ function varyChanged() {                        // one selector for every other 
 }
 function draw() {
   const curve = +$("curve").value, vary = $("vary").value;
+  const metric = $("report-metric").value;
   let sims = current.slice();
   for (const select of $("fixed").querySelectorAll("select")) sims = sims.filter(s => s.par[select.dataset.name] == select.value);
   if (vary) sims.sort((a, b) => a.par[vary] - b.par[vary]);
@@ -871,7 +952,7 @@ function draw() {
   const item = (color, text) => `<span><i style="background:${color}"></i>${text}</span>`;
   let legend = item("var(--ink)", "experiment ± SE") + (control ? item("var(--muted)", "uncoupled control") : "");
   if (sims.length > 12) legend += item(shade(0), `${sims.length} simulations, ${vary} from ${sims[0].par[vary].toPrecision(3)} (light)`) + item(shade(1), `to ${sims[sims.length - 1].par[vary].toPrecision(3)} (dark)`);
-  else sims.forEach((s, i) => { legend += item(shade(sims.length > 1 ? i / (sims.length - 1) : 0.6), `${vary ? vary + " " + s.par[vary] : "control (fold 1)"} · simulation ${s.id} · NRMSE ${s.nrmse[curve] === null ? "n/a" : s.nrmse[curve].toFixed(3)}`); });
+  else sims.forEach((s, i) => { const fit = s[metric][curve]; legend += item(shade(sims.length > 1 ? i / (sims.length - 1) : 0.6), `${vary ? vary + " " + s.par[vary] : "control (fold 1)"} · simulation ${s.id} · ${metric === "nrmse3" ? "sum of NRMSE" : metric.toUpperCase()} ${fit === null ? "n/a" : fit.toFixed(3)}`); });
   $("legend").innerHTML = legend;
   rateTable(sims, vary);
 }
@@ -896,25 +977,81 @@ options($("curve"), DATA.curve_names.map((_, i) => i), DATA.curve_names);
 options($("group"), groups);
 $("group").onchange = () => { options($("model"), Object.keys(DATA.models).filter(m => DATA.models[m].group === $("group").value)); modelChanged(); };
 $("model").onchange = modelChanged; $("vary").onchange = varyChanged; $("curve").onchange = draw;
-$("curve").value = 1; $("group").value = groups[Math.min(1, groups.length - 1)]; $("group").onchange();
+$("curve").value = DATA.default_curve; $("group").value = groups[Math.min(1, groups.length - 1)]; $("group").onchange();
 """
+
+
+REPORT_JS = r"""
+function updateReport() {
+  const metric = document.getElementById("report-metric").value;
+  const top = document.getElementById("report-top").value;
+  document.querySelectorAll(".metric-view").forEach(view => { view.hidden = view.dataset.metric !== metric; });
+  document.querySelectorAll(".plot-card").forEach(card => {
+    const variants = [...card.querySelectorAll(".plot-variant")];
+    const eligible = variants.filter(v => (!v.dataset.metric || v.dataset.metric === metric) && (!v.dataset.top || v.dataset.top === top));
+    const pages = [...new Set(eligible.map(v => v.dataset.page || "1"))];
+    const select = card.querySelector(".plot-page"), previous = select.value;
+    select.replaceChildren(...pages.map((page, i) => new Option(`Page ${i + 1} of ${pages.length}`, page)));
+    if (pages.includes(previous)) select.value = previous;
+    card.querySelector(".page-control").hidden = pages.length <= 1;
+    const chosen = eligible.find(v => (v.dataset.page || "1") === select.value);
+    variants.forEach(view => {
+      view.hidden = view !== chosen;
+      if (view === chosen) {
+        const img = view.querySelector("img");
+        if (!img.hasAttribute("src")) img.src = img.dataset.src;
+      }
+    });
+    card.hidden = !chosen;
+  });
+  if (typeof draw === "function" && current.length) draw();
+}
+document.getElementById("report-metric").addEventListener("change", updateReport);
+document.getElementById("report-top").addEventListener("change", updateReport);
+document.querySelectorAll(".plot-page").forEach(select => select.addEventListener("change", updateReport));
+updateReport();
+"""
+
+
+def plot_cards(plots):
+    parts = []
+    for section in dict.fromkeys(plot["section"] for plot in plots):
+        parts.append(f"<h2>{html.escape(section)}</h2>")
+        selected = [plot for plot in plots if plot["section"] == section]
+        for key in dict.fromkeys(plot["key"] for plot in selected):
+            variants = []
+            for plot in (p for p in selected if p["key"] == key):
+                stem, title, caption = plot["stem"], html.escape(plot["title"]), html.escape(plot["caption"])
+                attrs = " ".join(f'data-{name}="{html.escape(str(plot[name]), quote=True)}"' for name in ("metric", "top", "page"))
+                variants.append(f'<figure class="plot-variant" {attrs} hidden><h3>{title}</h3><p class="sub">{caption} '
+                                f'<a href="plots/{stem}.pdf">PDF</a> · <a href="plots/{stem}.png">PNG</a></p>'
+                                f'<img data-src="plots/{stem}.png" alt="{title}" loading="lazy"></figure>')
+            parts.append('<section class="card plot-card"><label class="page-control" hidden>Labelled models'
+                         '<select class="plot-page"></select></label>' + "".join(variants) + "</section>")
+    return "".join(parts)
 
 
 def write_report(run_dir, config, done, table, curves, experiment, experiment_on, fitted, hat_experiment, plots):
     matching = config["simulation"].get("rate_matching", "time_average")
     data = json.dumps(write_explorer(run_dir, table, curves, experiment, fitted, matching), separators=(",", ":")).replace("</", "<\\/")
-    figures = ""
-    for section in dict.fromkeys(plot[0] for plot in plots):                    # one heading per group of plots
-        figures += f"<h2>{html.escape(section)}</h2>" + "".join(
-            f'<section class="card"><figure><h3>{html.escape(title)}</h3><p class="sub">{html.escape(caption)} '
-            f'<a href="plots/{stem}.pdf">PDF</a> · <a href="plots/{stem}.png">PNG</a></p>'
-            f'<img src="plots/{stem}.png" alt="{html.escape(title)}" loading="lazy"></figure></section>'
-            for part, stem, title, caption in plots if part == section)
+    figures = plot_cards(plots)
+    summaries = "".join(f'<div class="metric-view" data-metric="{metric}" hidden>{group_summary(table, metric)}</div>'
+                        for metric, _ in FIT_METRICS)
+    top_tables = "".join(f'<div class="metric-view" data-metric="{metric}" hidden>{top_table(table, experiment_on, hat_experiment, metric)}</div>'
+                         for metric, _ in FIT_METRICS)
+    top_options = '<option value="all">All architectures</option>' + "".join(
+        f'<option value="{n}" {"selected" if n == 100 else ""}>Top {n} architectures</option>' for n in TOP_ARCHITECTURES)
     hat = hat_experiment["reporter"]
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Coupled-model sweep results</title><style>{STYLE}</style></head>
 <body><main><h1>Coupled-model sweep: results</h1>
-<p class="sub">{done} · rate matching: {config["simulation"].get("rate_matching", "time_average")} · score = {html.escape(SCORE_NAME)} (lower is better) · lags within ±{PLOT_MAX_LAG_MIN} min shown.</p>
+<p class="sub">{done} · rate matching: {config["simulation"].get("rate_matching", "time_average")} · lags within ±{PLOT_MAX_LAG_MIN} min shown.</p>
+<section class="card report-controls"><div class="controls">
+<label>Fit metric — applies throughout the report<select id="report-metric"><option value="nrmse">NRMSE — lower is better</option><option value="ccc">CCC — higher is better</option><option value="nrmse3">Sum of NRMSE of cross-correlation and both autocorrelations — lower is better</option></select></label>
+<label>Architecture heatmaps<select id="report-top">{top_options}</select></label></div>
+<p class="sub">Top-ten curves and tables use the selected metric of the reporter cross-correlation. Architecture heatmaps use the selected metric of their displayed observable.
+The threshold-filtered heatmaps always include all qualifying architectures, with labelled pages.</p></section>
+<noscript><p>Enable JavaScript to use the metric, top-count and page selectors. Exported PDFs and PNGs are in plots/.</p></noscript>
 
 <h2>Explore: how a parameter changes the curves</h2>
 <section class="card"><div class="controls">
@@ -926,14 +1063,15 @@ def write_report(run_dir, config, done, table, curves, experiment, experiment_on
 fewer simulations are shown). The individual replicates are in the results files (columns rep1, rep2, ...). Light to dark blue = increasing value of the varied parameter. If a model was sampled with many random
 parameter sets (extensive sweep), all of them are drawn and the other parameters are not held fixed.</p></section>
 
-<h2>Summary by model group</h2><section class="card">{group_summary(table)}</section>
-<p class="sub">Mexican-hat shape: mean cross-correlation positive within ±{HAT_CENTER_MIN} min and negative in both flanks
+<h2>Summary by model group</h2><section class="card">{summaries}</section>
+<p class="sub">Shape filter: mean cross-correlation ≥ {HAT_CENTER_THRESHOLD:g} within ±{HAT_CENTER_MIN} min and ≤ {HAT_FLANK_THRESHOLD:g} in EACH flank
 ({HAT_FLANKS_MIN[0]} to {HAT_FLANKS_MIN[1]} min on each side). Depth = centre minus the mean of the flanks. Experiment (reporter count):
 centre {hat["center"]:.3f}, left {hat["left"]:.3f}, right {hat["right"]:.3f}, depth {hat["hat"]:.3f}.</p>
-<h2>The {TOP_N} best simulations</h2><section class="card">{top_table(table, experiment_on, hat_experiment)}
-<p class="sub">All simulations: <a href="ranked_scores.csv">ranked_scores.csv</a></p></section>
+<h2>The {TOP_N} best simulations</h2><section class="card">{top_tables}
+<p class="sub">All simulations: <a href="ranked_scores.csv">ranked_scores.csv</a>. That CSV retains the original score() ranking: {html.escape(SCORE_NAME)}.</p></section>
+<p class="sub">Threshold-selected parameter sets are also exported as shape_selected_[observable]_by_[metric].csv in this run folder.</p>
 {figures}
-<script>const DATA={data};</script><script>{EXPLORER_JS}</script></main></body></html>"""
+<script>const DATA={data};</script><script>{EXPLORER_JS}</script><script>{REPORT_JS}</script></main></body></html>"""
     (run_dir / "results_report.html").write_text(page)
 
 # ---------------------------------------------------------------------------
@@ -959,68 +1097,94 @@ def main():
     folder.mkdir(exist_ok=True)
     for old in [*folder.glob("*.pdf"), *folder.glob("*.png")]:
         old.unlink()
-    plots = []      # (report section, file name, title, caption) of every plot, in report order
+    plots = []      # figure files plus metric/top/page choices for the HTML selectors
 
-    def save(section, figure, name, title, caption):
+    def save(section, figure, name, title, caption, key=None, metric="", top="", page=""):
         if figure is None:
             return
         stem = f"{len(plots) + 1:02d}_{name}"
         figure.savefig(folder / f"{stem}.pdf", dpi=300)
         figure.savefig(folder / f"{stem}.png", dpi=PNG_DPI)
         plt.close(figure)
-        plots.append((section, stem, title, caption))
+        plots.append(dict(section=section, stem=stem, title=title, caption=caption,
+                          key=key or name, metric=metric, top=str(top), page=str(page)))
 
-    save("Best simulations", top_curves(table, curves, experiment, experiment_on), "top_simulations", f"The {TOP_N} best simulations",
-         "Every curve of each top simulation (blue, mean ± SE) against experiment (black) and the uncoupled control (grey, dashed).")
+    for metric, _ in FIT_METRICS:
+        save("Best simulations", top_curves(table, curves, experiment, experiment_on, metric), f"top_simulations_{metric}",
+             f"The {TOP_N} best simulations by {FIT_NAMES[metric]}",
+             "Every curve of each top simulation (blue, mean ± SE) against experiment (black) and the uncoupled control "
+             "(grey, dashed). Each plotting box is square. Ranking uses the reporter cross-correlation.",
+             key="top_simulations", metric=metric)
 
     names = {"reporter": "reporter count", "binary": "ON/OFF state"}
-    if "reporter" in observables:                       # fit of all three curves: pages and the top-10 / top-100 lists
-        column = "nrmse3_reporter"
-        best = table.sort_values(column, na_position="last").drop_duplicates("model_id")
-        keep = ["model_id", "group", "block1", "sim_id", column, "nrmse_reporter_EG", "nrmse_reporter_EE", "nrmse_reporter_GG",
-                "ccc_reporter_EG", "hat_reporter", "hat_shape_reporter", "on_E", "on_G", "EG_state", "EG_rates", "GE_state",
-                "GE_rates", "HE_state", "HE_rates", "HG_state", "HG_rates"] + PARAMETERS
+    three_curves = [pair for pair in ("EG", "EE", "GG") if pair in pairs]
+    if "reporter" in observables:                       # top-10 / top-100 architectures by the fit of all three curves
+        best = table.sort_values("nrmse3_reporter", na_position="last").drop_duplicates("model_id")
+        keep = ["model_id", "group", "block1", "sim_id", "nrmse3_reporter", "nrmse_reporter_EG", "nrmse_reporter_EE",
+                "nrmse_reporter_GG", "ccc_reporter_EG", "hat_reporter", "hat_shape_reporter", "on_E", "on_G", "EG_state", "EG_rates",
+                "GE_state", "GE_rates", "HE_state", "HE_rates", "HG_state", "HG_rates"] + PARAMETERS
         for n in (10, 100):
             listing = best.head(n)[keep].rename(columns={"block1": "model_type", "sim_id": "best_sim_id"}).dropna(axis=1, how="all")
             listing.insert(0, "rank", range(1, len(listing) + 1))
             listing.to_csv(run_dir / f"top_{n}_architectures.csv", index=False)
-        for top, section, what in [(None, "Best parameter set of every architecture", "every architecture"),
-                                   (TOP_ARCHITECTURES, f"Top {TOP_ARCHITECTURES} architectures", f"the {TOP_ARCHITECTURES} best architectures")]:
-            title = f"Reporter count, all three curves: {what}, best parameter set by the sum of NRMSE"
-            save(section, architecture_heatmap(title, best_per_architecture(table, column, True, top), curves, experiment, "reporter",
-                                               column, True, pairs=[p for p in ("EG", "EE", "GG") if p in pairs]),
-                 f"architectures_{'top' if top else 'all'}_reporter_by_nrmse3", title,
-                 "Best parameter set of each architecture by the sum of NRMSE of the cross-correlation and both autocorrelations "
-                 "(reporter count). One row per architecture, grouped by model group and sub-type (left bar) and sorted by fit "
-                 "within each sub-type, best on top. Right bar: the fit (darker = better). Each curve has its own colour scale.")
     for observable in [o for o in ("reporter", "binary") if o in observables]:
-        for metric, ascending in [("nrmse", True), ("ccc", False)]:
-            column = f"{metric}_{observable}_EG"
-            for top, section, what in [(None, "Best parameter set of every architecture", "every architecture"),
-                                       (TOP_ARCHITECTURES, f"Top {TOP_ARCHITECTURES} architectures", f"the {TOP_ARCHITECTURES} best architectures")]:
+        for metric, ascending in FIT_METRICS:
+            column = fit_column(metric, observable)
+            for top in (None, *TOP_ARCHITECTURES):
+                what = "every architecture" if top is None else f"up to {top} best architectures"
                 rows = best_per_architecture(table, column, ascending, top)
-                title = f"Cross-correlation, {names[observable]}: {what}, best parameter set by {metric.upper()}"
-                save(section, architecture_heatmap(title, rows, curves, experiment, observable, column, ascending),
-                     f"architectures_{'top' if top else 'all'}_{observable}_by_{metric}", title,
+                title = f"{names[observable].capitalize()}: {what}, best parameter set by {FIT_NAMES[metric]}"
+                save("Best parameter set per architecture",
+                     architecture_heatmap(title, rows, curves, experiment, observable, column, ascending, compact=top is not None,
+                                          pairs=three_curves if metric == "nrmse3" else ("EG",)),
+                     f"architectures_{top if top else 'all'}_{observable}_by_{metric}", title,
                      "One row per architecture, with its best parameter set. Rows are grouped by model group and sub-type "
                      "(left bar; neighbouring sub-types differ in colour) and sorted by fit within each sub-type, best on top. "
-                     "Right bar: the fit (darker = better). Panel heights are not to scale.")
+                     "Right bar: the fit (darker = better). Group heights grow with the logarithm of the row count.",
+                     key=f"architectures_{observable}", metric=metric, top=top if top is not None else "all")
+            # Filter parameter sets BEFORE picking one best row per architecture. A model's overall best fit
+            # may fail the shape thresholds even when another of its parameter sets passes them.
+            qualifying = table.loc[table[f"hat_shape_{observable}"]]
+            selected = best_per_architecture(qualifying, column, ascending)
+            selected.drop(columns=["curve_row"] + BLOCKS, errors="ignore").to_csv(
+                run_dir / f"shape_selected_{observable}_by_{metric}.csv", index=False)
+            page_count = max(1, int(np.ceil(len(selected) / HAT_MODELS_PER_PAGE)))
+            for page_index in range(page_count):
+                page_rows = selected.iloc[page_index * HAT_MODELS_PER_PAGE:(page_index + 1) * HAT_MODELS_PER_PAGE]
+                title = (f"Threshold-qualified cross-correlations, {names[observable]}: {len(selected):,} architectures; "
+                         f"best qualifying set by {FIT_NAMES[metric]} · page {page_index + 1}/{page_count}")
+                save("Models passing the centre and both-flank thresholds",
+                     architecture_heatmap(title, page_rows, curves, experiment, observable, column, ascending, annotate_models=True),
+                     f"shape_selected_{observable}_{metric}_page{page_index + 1:03d}", title,
+                     f"Centre mean ≥ {HAT_CENTER_THRESHOLD:g}; left AND right flank means ≤ {HAT_FLANK_THRESHOLD:g}. "
+                     "One best qualifying parameter set per architecture, with its full model label at left. All qualifying "
+                     "architectures are included across the pages; the top-count selector does not truncate this selection. "
+                     f"Selected rows: shape_selected_{observable}_by_{metric}.csv.",
+                     key=f"shape_selected_{observable}", metric=metric, page=page_index + 1)
         save("Shape map", shape_map(table, observable, hat_experiment), f"shape_map_{observable}",
              f"Shape of the cross-correlation, {names[observable]}",
-             "Every simulation as a point: the mean of the cross-correlation near zero lag against the mean of its two flanks. "
-             "Simulations in the shaded corner have the Mexican-hat shape. At most 50,000 points drawn per panel.")
+             "Each point is a parameter set's mean curve across replicate datasets. Blue = the named model family; grey = the full sweep. "
+             f"Shading: centre ≥ {HAT_CENTER_THRESHOLD:g}, mean of the two flanks ≤ {HAT_FLANK_THRESHOLD:g}. The filtered heatmap "
+             "also requires EACH flank to pass; therefore not every point inside the shaded area necessarily qualifies. "
+             "X = experiment; diamond = uncoupled. Up to 50,000 points per scatter layer are drawn; selection uses all points.")
 
     for column, title, scale in METRICS:
         reference = hat_experiment[column.split("_")[1]]["hat"] if column.startswith("hat") else None
+        metric = column.split("_")[0] if column.startswith(("nrmse_", "ccc_", "nrmse3_")) else ""
+        key = f"by_group_fit_{column.split('_')[1]}" if metric else f"by_group_{column}"
         save("Metrics by model group", metric_by_group(table, column, title, scale, reference), f"by_group_{column}", title,
-             "Violin and one faint point per simulation (at most 50,000 drawn per group); the bar and the number at the right are the group median.")
+             "Violin and one faint point per simulation (at most 50,000 drawn per group); the bar and the number at the right are the group median.",
+             key=key, metric=metric)
     for column, title, scale in METRICS:
+        metric = column.split("_")[0] if column.startswith(("nrmse_", "ccc_", "nrmse3_")) else ""
+        key = f"vs_parameters_fit_{column.split('_')[1]}" if metric else f"vs_parameters_{column}"
         save("Metrics against each swept parameter", metric_vs_parameters(table, column, scale), f"vs_parameters_{column}", title,
-             "One point per simulation (at most 50,000 drawn per panel); the black line joins the medians.")
+             "One point per simulation (at most 50,000 drawn per panel); the black line joins the medians.", key=key, metric=metric)
 
     rows_text = ("Each row is one simulation (the mean of its replicates). Top strip: experiment. White lines separate model types "
                  "(source state and regulated rates; for hidden models also the hidden rates), named where there is room. "
-                 "Within a type, rows go from the smallest to the largest parameter values. Panel heights are not to scale.")
+                 "Within a type, rows go from the smallest to the largest parameter values. Panel heights use a compressed "
+                 "square-root scale of row count, giving small groups less space.")
     for observable, pair, name in CURVES:
         save("Heatmaps of all model groups, by model type and parameters", curve_heatmap(table, curves, experiment, observable, pair, name),
              f"heatmap_{pair}_{observable}", name, rows_text)
@@ -1028,23 +1192,25 @@ def main():
          "heatmap_on_fraction", "ON fraction relative to experiment", "Rows as in the curve heatmaps.")
 
     for observable, name in [(o, names[o]) for o in ("reporter", "binary") if o in observables]:
-        for metric, ascending in [("nrmse", True), ("ccc", False)]:
-            ordered = sorted_within_groups(table, f"{metric}_{observable}_EG", ascending)
-            title = f"CCAT1 x MYC cross-correlation, {name}: sorted by {metric.upper()} within each group"
+        for metric, ascending in FIT_METRICS:
+            ordered = sorted_within_groups(table, fit_column(metric, observable), ascending)
+            title = f"CCAT1 x MYC cross-correlation, {name}: sorted by {FIT_NAMES[metric]} within each group"
             save("Cross-correlation heatmaps, each whole group sorted by fit",
                  curve_heatmap(ordered, curves, experiment, observable, "EG", title, blocks=False),
-                 f"heatmap_EG_{observable}_by_{metric}", title, "Best simulations on top of each group; model types are mixed.")
+                 f"heatmap_EG_{observable}_by_{metric}", title, "Best simulations on top of each group; model types are mixed.",
+                 key=f"heatmap_EG_{observable}_by_fit", metric=metric)
 
     for group in dict.fromkeys(table["group"]):
         if (table["group"] == group).sum() < 2:
             continue
         for observable, pair, name in CURVES:
-            title = f"{group}: {name}"
-            save(f"One model group per page: {group}", group_heatmap(table, curves, experiment, group, observable, pair, title),
-                 f"group_{group}_{pair}_{observable}", title,
-                 "Left: by model type, then parameters; the names beside it give the model types. Middle and right: the same "
-                 "model types in the same order, each sorted by NRMSE and by CCC of this curve. The columns are independent: "
-                 "a row in one column is not the same simulation as the row beside it.")
+            for metric, _ in FIT_METRICS:
+                title = f"{group}: {name} · parameter order and {FIT_NAMES[metric]} order"
+                save(f"One model group per page: {group}", group_heatmap(table, curves, experiment, group, observable, pair, title, metric),
+                     f"group_{group}_{pair}_{observable}_{metric}", title,
+                     "Left: by model type, then parameters. Right: the same model types, sorted within each type by the selected "
+                     "metric, best on top. The columns are independently ordered; neighbouring rows need not be the same simulation.",
+                     key=f"group_{group}_{pair}_{observable}", metric=metric)
 
     write_report(run_dir, config, done, table, curves, experiment, experiment_on, fitted, hat_experiment, plots)
     print(f"Wrote {run_dir / 'results_report.html'} (needs plots/ and explorer/ next to it) and {run_dir / 'ranked_scores.csv'}")
