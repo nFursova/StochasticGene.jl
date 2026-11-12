@@ -43,6 +43,15 @@ h32 = [0.001, 1000.0]                # H3 only: G-active state 3 -> inactive sta
 [report]                             # what 4_plot_results.py draws (leave out a value to skip its plots)
 observables = ["reporter", "binary"] # reporter = reporter count, binary = ON/OFF state
 curves = ["EG", "EE", "GG"]          # EG = CCAT1 x MYC cross-correlation, EE / GG = CCAT1 / MYC autocorrelation
+combine = "mean"                     # combined score of the 3 curves' NRMSEs: "mean" or "sum" (same ranking; sets the scale)
+
+[report.shape]                       # selection of Mexican-hat-shaped cross-correlations (shape pages of the report)
+center_min = 0.01                    # mean cross-correlation within +/-10 min must be at least this
+flank_max = -0.01                    # and the mean of EACH flank (20 to 60 min on either side) at most this
+nrmse_max = 0.9                      # a second selection also requires NRMSE below this ("" = no second selection)
+nrmse_of = "cross"                   # which NRMSE: "cross" = of the cross-correlation, "combined" = the combined score
+                                     # above, "each" = of each of the 3 curves
+labelled_pages = true                # also draw the selections with every model labelled, 40 models per page
 
 [simulation]
 simulator = "fast"                   # "fast" or "stochasticgene"

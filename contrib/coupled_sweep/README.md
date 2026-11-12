@@ -96,7 +96,7 @@ For the extensive sweep, set `mode = "extensive"` and a new `run_dir` in `config
 | `results/curves_*.csv` | steps 4, 6 | The six correlation curves of every simulation: mean, SE, and every replicate (`rep1`, `rep2`, ...) |
 | `results/metrics_*.csv` | steps 4, 6 | One row per simulation: ON fractions and mean reporters (mean, SE and every replicate), NRMSE and CCC of the six curves, base rates |
 | `results_report.html` | step 7 | Interactive explorer (pick a model, vary one parameter), summary tables, and every plot. Needs `plots/` and `explorer/` next to it |
-| (in the report) | step 7 | A selector at the top switches every fit-based plot and table between NRMSE, CCC and the sum of NRMSE of the three curves; a second one shows all architectures or the top 10, 100 or 200. One row per architecture with its best parameter set, rows grouped by model group and sub-type and sorted by fit, with a sub-type bar and a fit bar. A shape map: every simulation's cross-correlation centre against its flanks, per group, and heatmaps of every architecture that passes the shape thresholds (labelled, 40 per page) |
+| (in the report) | step 7 | A selector at the top switches every fit-based plot and table between NRMSE, CCC and the mean NRMSE of the three curves; a second one shows all architectures or the top 10, 100 or 200. One row per architecture with its best parameter set, rows grouped by model group and sub-type and sorted by fit, with a sub-type bar and a fit bar. A shape map: every simulation's cross-correlation centre against its flanks, per group, and heatmaps of every architecture that passes the shape thresholds (labelled, 40 per page) |
 | `plots/` | step 7 | Every plot as a PDF and a 600 dpi PNG |
 | `explorer/` | step 7 | The data the report's explorer loads when you pick a model: one small file per model (mean and SE of its curves) |
 | `ranked_scores.csv` | step 7 | Every simulation with parameters, metrics and score, best first |
@@ -159,15 +159,25 @@ NRMSE of the reporter cross-correlation by default; edit it to use any saved met
 
 The report also computes the Mexican-hat shape of each cross-correlation: its mean within ±10 min
 (`center_*`), its mean in the flanks from 20 to 60 min on each side (`left_*`, `right_*`), the depth
-`hat_*` = centre minus the mean of the flanks, and `hat_shape_*` = true when the centre is at least 0.01 and
-each flank is at most −0.01. The windows are `HAT_CENTER_MIN` and `HAT_FLANKS_MIN`, the thresholds
-`HAT_CENTER_THRESHOLD` and `HAT_FLANK_THRESHOLD`, all at the top of the script. The architectures that pass are
-listed, each with its best passing parameter set, in `shape_selected_<observable>_by_<metric>.csv` in the run folder.
+`hat_*` = centre minus the mean of the flanks, and `hat_shape_*` = true when the centre is at least
+`center_min` and each flank is at most `flank_max` (`[report.shape]` in the config; defaults 0.01 and −0.01). The
+windows are `HAT_CENTER_MIN` and `HAT_FLANKS_MIN` at the top of the script.
+
+**Shape selection.** The report has two selections, switched by the "Shape selection" menu at the top:
+`shape` (the thresholds above) and `shape_nrmse` (also NRMSE below `nrmse_max`, default 0.9; `nrmse_of` picks the
+NRMSE: `"cross"` = of the cross-correlation (default), `"combined"` = the combined score, `"each"` = of each of the
+three curves; `nrmse_max = ""` drops this selection). For each, the report draws one row per architecture (source
+states and regulated rates) with its best passing parameter set, grouped by model group and sub-type and sorted by
+the selected fit metric, and (with `labelled_pages = true`) the same with every model labelled, 40 per page.
+Files in the run folder, with `<selection>` = `shape` or `shape_nrmse`:
+- `<selection>_passing_<observable>.csv`: every passing parameter set
+- `<selection>_selected_<observable>_by_<metric>.csv`: the best passing set of each architecture, by `nrmse`, `ccc`
+  or `nrmse3`
 All are columns of `ranked_scores.csv` and can be used in `score()`.
 
-`nrmse3_reporter` is the fit of all three curves: NRMSE of the cross-correlation + NRMSE of the CCAT1
-autocorrelation + NRMSE of the MYC autocorrelation (reporter count, equal weights). It ranks the extra report
-pages "by the sum of NRMSE" and the lists `top_10_architectures.csv` and `top_100_architectures.csv` in the run
+`nrmse3_reporter` is the fit of all three curves: the mean of the NRMSEs of the cross-correlation, the CCAT1
+autocorrelation and the MYC autocorrelation (reporter count, equal weights; `[report] combine = "sum"` gives their
+sum, which ranks the same). It is the third option of the report's fit-metric menu and ranks the lists `top_10_architectures.csv` and `top_100_architectures.csv` in the run
 folder: the best architectures, each with its best parameter set (all its parameters and fits in one row).
 
 ## Notes

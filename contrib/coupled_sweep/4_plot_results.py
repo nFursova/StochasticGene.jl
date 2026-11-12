@@ -31,16 +31,58 @@ PNG_DPI = 600
 A4 = (8.27, 11.69)          # page size of the heatmaps, inches
 HAT_CENTER_MIN = 10         # Mexican-hat shape: the cross-correlation should be positive within +/- this many minutes
 HAT_FLANKS_MIN = (20, 60)   # and negative between these lags (minutes) on both sides
-HAT_CENTER_THRESHOLD = 0.01
-HAT_FLANK_THRESHOLD = -0.01           # EACH flank must pass, not only their average
+# Shape selection and combined score. These are defaults; [report] and [report.shape] in the config override them.
+HAT_CENTER_THRESHOLD = 0.01           # centre mean must be >= this
+HAT_FLANK_THRESHOLD = -0.01           # EACH flank mean must be <= this, not only their average
+SHAPE_NRMSE_MAX = 0.9                 # second selection: shape AND NRMSE < this (None = no second selection)
+SHAPE_NRMSE_OF = "cross"              # "cross": cross-correlation NRMSE; "combined": combined score; "each": all 3 curves
+SHAPE_LABELLED_PAGES = True           # also draw the selection with every model labelled, HAT_MODELS_PER_PAGE per page
+COMBINE = "mean"                      # combined score of the 3 NRMSEs (cross-correlation, both autocorrelations): mean or sum
 HAT_MODELS_PER_PAGE = 40              # every qualifying architecture is labelled; no models are dropped
-FIT_METRICS = (("nrmse", True), ("ccc", False), ("nrmse3", True))   # (metric, lower is better); nrmse3 = sum of 3 NRMSEs
-FIT_NAMES = {"nrmse": "NRMSE", "ccc": "CCC", "nrmse3": "sum of NRMSE (3 curves)"}
+FIT_METRICS = (("nrmse", True), ("ccc", False), ("nrmse3", True))   # (metric, lower is better); nrmse3 = combined score
+FIT_NAMES = {"nrmse": "NRMSE", "ccc": "CCC", "nrmse3": "mean NRMSE (3 curves)"}
 
 
 def fit_column(metric, observable, pair="EG"):
-    """Column of a fit metric: NRMSE or CCC of one curve, or nrmse3 = NRMSE of EG + EE + GG of the observable."""
+    """Column of a fit metric: NRMSE or CCC of one curve, or nrmse3 = mean (or sum) of the NRMSEs of EG, EE and GG."""
     return f"nrmse3_{observable}" if metric == "nrmse3" else f"{metric}_{observable}_{pair}"
+
+
+def configure(config):
+    """Read the [report] and [report.shape] settings of the config into the settings above."""
+    global HAT_CENTER_THRESHOLD, HAT_FLANK_THRESHOLD, SHAPE_NRMSE_MAX, SHAPE_NRMSE_OF, SHAPE_LABELLED_PAGES, COMBINE, METRICS
+    report = config.get("report", {})
+    shape = report.get("shape", {})
+    COMBINE = report.get("combine", COMBINE)
+    HAT_CENTER_THRESHOLD = float(shape.get("center_min", HAT_CENTER_THRESHOLD))
+    HAT_FLANK_THRESHOLD = float(shape.get("flank_max", HAT_FLANK_THRESHOLD))
+    limit = shape.get("nrmse_max", SHAPE_NRMSE_MAX)
+    SHAPE_NRMSE_MAX = None if limit in ("", None, False) else float(limit)
+    SHAPE_NRMSE_OF = shape.get("nrmse_of", SHAPE_NRMSE_OF)
+    SHAPE_LABELLED_PAGES = bool(shape.get("labelled_pages", SHAPE_LABELLED_PAGES))
+    if COMBINE not in ("mean", "sum") or SHAPE_NRMSE_OF not in ("cross", "combined", "each"):
+        raise SystemExit('[report] combine must be "mean" or "sum"; [report.shape] nrmse_of "cross", "combined" or "each"')
+    FIT_NAMES["nrmse3"] = f"{COMBINE} NRMSE (3 curves)"
+    METRICS = [(column, f"{COMBINE.capitalize()} NRMSE of the cross-correlation and both autocorrelations, {title.split(', ')[-1]}", scale)
+               if column.startswith("nrmse3_") else (column, title, scale) for column, title, scale in METRICS]
+
+
+def shape_selections(table, observable):
+    """The parameter-set selections of the shape pages: [(key, description, boolean mask over table rows)].
+    "shape": centre >= HAT_CENTER_THRESHOLD and each flank <= HAT_FLANK_THRESHOLD. "shape_nrmse": also NRMSE below
+    SHAPE_NRMSE_MAX (of the cross-correlation, of the combined score, or of each of the three curves)."""
+    shape = table[f"hat_shape_{observable}"].fillna(False).to_numpy(dtype=bool)
+    selections = [("shape", f"centre ≥ {HAT_CENTER_THRESHOLD:g}, each flank ≤ {HAT_FLANK_THRESHOLD:g}", shape)]
+    if SHAPE_NRMSE_MAX is not None:
+        if SHAPE_NRMSE_OF == "cross":
+            good, what = table[f"nrmse_{observable}_EG"] < SHAPE_NRMSE_MAX, "cross-correlation NRMSE"
+        elif SHAPE_NRMSE_OF == "combined":
+            good, what = table[f"nrmse3_{observable}"] < SHAPE_NRMSE_MAX, FIT_NAMES["nrmse3"]
+        else:
+            good = np.logical_and.reduce([table[f"nrmse_{observable}_{pair}"] < SHAPE_NRMSE_MAX for pair in ("EG", "EE", "GG")])
+            what = "NRMSE of each of the 3 curves"
+        selections.append(("shape_nrmse", f"{selections[0][1]}, {what} < {SHAPE_NRMSE_MAX:g}", shape & np.asarray(good, dtype=bool)))
+    return selections
 
 SCORE_NAME = "NRMSE of the reporter-count cross-correlation"
 MAX_POINTS = 50_000         # scatter plots draw at most this many randomly chosen points per row (medians use all)
@@ -51,13 +93,13 @@ def score(metrics):
 
     `metrics` has one row per simulation with these columns:
         nrmse_<observable>_<pair>   0 = identical to experiment
-        nrmse3_<observable>         nrmse of EG + nrmse of EE + nrmse of GG (all three curves)
+        nrmse3_<observable>         mean (or sum, [report] combine) of the NRMSEs of EG, EE and GG (all three curves)
         ccc_<observable>_<pair>     1 = identical to experiment
         on_E, on_G, reporters_E, reporters_G
         center_<observable>, left_<observable>, right_<observable>   mean cross-correlation within +/- HAT_CENTER_MIN
                                     and in the left and right flanks (HAT_FLANKS_MIN)
         hat_<observable>            Mexican-hat depth: center minus the mean of the two flanks
-        hat_shape_<observable>      True if center >= 0.025 and each flank <= -0.025 (thresholds above)
+        hat_shape_<observable>      True if center >= HAT_CENTER_THRESHOLD and each flank <= HAT_FLANK_THRESHOLD
     observable: binary (ON/OFF state) or reporter (reporter count)
     pair:       EG (CCAT1 x MYC cross-correlation), EE (CCAT1 autocorrelation), GG (MYC autocorrelation)
     Example of a combined score:  metrics["nrmse_reporter_EG"] + metrics["nrmse_binary_EG"]
@@ -70,8 +112,8 @@ CURVES = [(observable, pair, f"{pair_name}, {observable_name}")
                                   ("GG", "MYC autocorrelation")]
           for observable, observable_name in [("binary", "ON/OFF state"), ("reporter", "reporter count")]]
 # The metrics drawn per model group (violins) and against every swept parameter: (column, title, axis scale).
-# nrmse3_<observable>: NRMSE of the cross-correlation + CCAT1 autocorrelation + MYC autocorrelation (added in load).
-METRICS = [(f"nrmse3_{observable}", f"Sum of NRMSE of the cross-correlation and both autocorrelations, {observable_name}", "log")
+# nrmse3_<observable>: mean (or sum) of the NRMSEs of the cross-correlation and both autocorrelations (added in load).
+METRICS = [(f"nrmse3_{observable}", f"Mean NRMSE of the cross-correlation and both autocorrelations, {observable_name}", "log")
            for observable, observable_name in [("reporter", "reporter count"), ("binary", "ON/OFF state")]] + \
           [(f"{name}_{observable}{pair}", f"{title}, {observable_name}", scale)
            for observable, observable_name in [("reporter", "reporter count"), ("binary", "ON/OFF state")]
@@ -188,6 +230,7 @@ def read_simulations(run_dir, expanded):
 
 def load(config_path, profile):
     config = tomllib.loads(config_path.read_text())
+    configure(config)
     folder = config_path.parent
     run_dir, expanded, replicates = run_folder(config, folder, profile)
     simulations = read_simulations(run_dir, expanded)
@@ -204,8 +247,9 @@ def load(config_path, profile):
     table = simulations.merge(metrics, on=["sim_id", "model_id"]).sort_values("sim_id").reset_index(drop=True)
     table["curve_row"] = curves.position.reindex(table["sim_id"]).to_numpy()
     hat_experiment = add_hat_metrics(table, curves, experiment)
-    for observable in ("reporter", "binary"):           # fit of all three curves together
-        table[f"nrmse3_{observable}"] = table[[f"nrmse_{observable}_{pair}" for pair in ("EG", "EE", "GG")]].sum(axis=1, min_count=3)
+    for observable in ("reporter", "binary"):           # fit of all three curves together: mean (or sum) of their NRMSEs
+        three = table[[f"nrmse_{observable}_{pair}" for pair in ("EG", "EE", "GG")]]
+        table[f"nrmse3_{observable}"] = three.mean(axis=1, skipna=False) if COMBINE == "mean" else three.sum(axis=1, min_count=3)
     table["score"] = score(table)
     table["rank"] = table["score"].rank(method="first").astype("Int64")
     table = display_order(table)
@@ -579,7 +623,7 @@ def architecture_heatmap(title, rows, curves, experiment, observable, column, as
     else:                                               # group heights grow with log10(row count); small groups stay small
         strip = 0.6
         heights = [0.5 + 2 * np.log10(count) for count in counts]
-        figsize = (A4[0], A4[1] * (0.36 if compact else 0.85))   # top-N views: about a third of an A4 page
+        figsize = (A4[0], A4[1] * 0.36 if compact else min(A4[1] * 0.85, 2.0 + 0.3 * len(rows)))   # top-N: a third of A4
     figure, axes = plt.subplots(len(groups) + 1, n + 2, figsize=figsize, squeeze=False,
                                 gridspec_kw=dict(width_ratios=[0.035 * n] + [1] * n + [0.035 * n], wspace=0.03 + 0.1 * (n > 1),
                                                  hspace=0.07, height_ratios=[strip] + heights))
@@ -630,11 +674,12 @@ def architecture_heatmap(title, rows, curves, experiment, observable, column, as
     axes[0, -1].set_title("fit", fontsize=7)
     if n == 1:
         axes[0, 0].set_title("type", fontsize=7)
-    figure.suptitle(textwrap.fill(title, 140 if annotate_models else 100), x=0.03, y=0.985, ha="left", fontsize=10, fontweight="bold")
-    figure.subplots_adjust(left=0.47 if annotate_models else 0.3, right=0.85, top=1 - 0.68 / figsize[1],
+    title = textwrap.fill(title, 140 if annotate_models else 100)
+    figure.suptitle(title, x=0.03, y=0.985, ha="left", fontsize=10, fontweight="bold")
+    figure.subplots_adjust(left=0.47 if annotate_models else 0.3, right=0.85, top=1 - (0.68 + 0.17 * title.count("\n")) / figsize[1],
                            bottom=(0.42 + 0.42 * (n > 1)) / figsize[1])
-    fit_name = "sum of NRMSE" if column.startswith("nrmse3") else column.split("_")[0].upper()
-    bars = [(fit_image, [0.90, 0.19, 0.014, 0.23], f"{fit_name} ({'lower' if ascending else 'higher'} is better)")]
+    fit_name = FIT_NAMES["nrmse3"] if column.startswith("nrmse3") else column.split("_")[0].upper()
+    bars = [(fit_image, [0.90, 0.19, 0.014, 0.23], f"{fit_name}\n({'lower' if ascending else 'higher'} is better)")]
     if n == 1:
         bars.insert(0, (images[0], [0.90, 0.55, 0.014, 0.23], "correlation"))
     else:                                               # one small colour bar under each curve
@@ -952,7 +997,7 @@ function draw() {
   const item = (color, text) => `<span><i style="background:${color}"></i>${text}</span>`;
   let legend = item("var(--ink)", "experiment ± SE") + (control ? item("var(--muted)", "uncoupled control") : "");
   if (sims.length > 12) legend += item(shade(0), `${sims.length} simulations, ${vary} from ${sims[0].par[vary].toPrecision(3)} (light)`) + item(shade(1), `to ${sims[sims.length - 1].par[vary].toPrecision(3)} (dark)`);
-  else sims.forEach((s, i) => { const fit = s[metric][curve]; legend += item(shade(sims.length > 1 ? i / (sims.length - 1) : 0.6), `${vary ? vary + " " + s.par[vary] : "control (fold 1)"} · simulation ${s.id} · ${metric === "nrmse3" ? "sum of NRMSE" : metric.toUpperCase()} ${fit === null ? "n/a" : fit.toFixed(3)}`); });
+  else sims.forEach((s, i) => { const fit = s[metric][curve]; legend += item(shade(sims.length > 1 ? i / (sims.length - 1) : 0.6), `${vary ? vary + " " + s.par[vary] : "control (fold 1)"} · simulation ${s.id} · ${metric === "nrmse3" ? "combined NRMSE" : metric.toUpperCase()} ${fit === null ? "n/a" : fit.toFixed(3)}`); });
   $("legend").innerHTML = legend;
   rateTable(sims, vary);
 }
@@ -985,10 +1030,12 @@ REPORT_JS = r"""
 function updateReport() {
   const metric = document.getElementById("report-metric").value;
   const top = document.getElementById("report-top").value;
+  const selection = document.getElementById("report-selection").value;
   document.querySelectorAll(".metric-view").forEach(view => { view.hidden = view.dataset.metric !== metric; });
   document.querySelectorAll(".plot-card").forEach(card => {
     const variants = [...card.querySelectorAll(".plot-variant")];
-    const eligible = variants.filter(v => (!v.dataset.metric || v.dataset.metric === metric) && (!v.dataset.top || v.dataset.top === top));
+    const eligible = variants.filter(v => (!v.dataset.metric || v.dataset.metric === metric) && (!v.dataset.top || v.dataset.top === top)
+      && (!v.dataset.selection || v.dataset.selection === selection));
     const pages = [...new Set(eligible.map(v => v.dataset.page || "1"))];
     const select = card.querySelector(".plot-page"), previous = select.value;
     select.replaceChildren(...pages.map((page, i) => new Option(`Page ${i + 1} of ${pages.length}`, page)));
@@ -1008,6 +1055,7 @@ function updateReport() {
 }
 document.getElementById("report-metric").addEventListener("change", updateReport);
 document.getElementById("report-top").addEventListener("change", updateReport);
+document.getElementById("report-selection").addEventListener("change", updateReport);
 document.querySelectorAll(".plot-page").forEach(select => select.addEventListener("change", updateReport));
 updateReport();
 """
@@ -1022,7 +1070,7 @@ def plot_cards(plots):
             variants = []
             for plot in (p for p in selected if p["key"] == key):
                 stem, title, caption = plot["stem"], html.escape(plot["title"]), html.escape(plot["caption"])
-                attrs = " ".join(f'data-{name}="{html.escape(str(plot[name]), quote=True)}"' for name in ("metric", "top", "page"))
+                attrs = " ".join(f'data-{name}="{html.escape(str(plot[name]), quote=True)}"' for name in ("metric", "top", "page", "selection"))
                 variants.append(f'<figure class="plot-variant" {attrs} hidden><h3>{title}</h3><p class="sub">{caption} '
                                 f'<a href="plots/{stem}.pdf">PDF</a> · <a href="plots/{stem}.png">PNG</a></p>'
                                 f'<img data-src="plots/{stem}.png" alt="{title}" loading="lazy"></figure>')
@@ -1042,13 +1090,15 @@ def write_report(run_dir, config, done, table, curves, experiment, experiment_on
     top_options = '<option value="all">All architectures</option>' + "".join(
         f'<option value="{n}" {"selected" if n == 100 else ""}>Top {n} architectures</option>' for n in TOP_ARCHITECTURES)
     hat = hat_experiment["reporter"]
+    selection_options = "".join(f'<option value="{key}">{html.escape(text)}</option>' for key, text, _ in shape_selections(table, "reporter"))
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Coupled-model sweep results</title><style>{STYLE}</style></head>
 <body><main><h1>Coupled-model sweep: results</h1>
 <p class="sub">{done} · rate matching: {config["simulation"].get("rate_matching", "time_average")} · lags within ±{PLOT_MAX_LAG_MIN} min shown.</p>
 <section class="card report-controls"><div class="controls">
-<label>Fit metric — applies throughout the report<select id="report-metric"><option value="nrmse">NRMSE — lower is better</option><option value="ccc">CCC — higher is better</option><option value="nrmse3">Sum of NRMSE of cross-correlation and both autocorrelations — lower is better</option></select></label>
-<label>Architecture heatmaps<select id="report-top">{top_options}</select></label></div>
+<label>Fit metric — applies throughout the report<select id="report-metric"><option value="nrmse">NRMSE — lower is better</option><option value="ccc">CCC — higher is better</option><option value="nrmse3">{COMBINE.capitalize()} NRMSE of cross-correlation and both autocorrelations — lower is better</option></select></label>
+<label>Architecture heatmaps<select id="report-top">{top_options}</select></label>
+<label>Shape selection<select id="report-selection">{selection_options}</select></label></div>
 <p class="sub">Top-ten curves and tables use the selected metric of the reporter cross-correlation. Architecture heatmaps use the selected metric of their displayed observable.
 The threshold-filtered heatmaps always include all qualifying architectures, with labelled pages.</p></section>
 <noscript><p>Enable JavaScript to use the metric, top-count and page selectors. Exported PDFs and PNGs are in plots/.</p></noscript>
@@ -1069,7 +1119,8 @@ parameter sets (extensive sweep), all of them are drawn and the other parameters
 centre {hat["center"]:.3f}, left {hat["left"]:.3f}, right {hat["right"]:.3f}, depth {hat["hat"]:.3f}.</p>
 <h2>The {TOP_N} best simulations</h2><section class="card">{top_tables}
 <p class="sub">All simulations: <a href="ranked_scores.csv">ranked_scores.csv</a>. That CSV retains the original score() ranking: {html.escape(SCORE_NAME)}.</p></section>
-<p class="sub">Threshold-selected parameter sets are also exported as shape_selected_[observable]_by_[metric].csv in this run folder.</p>
+<p class="sub">Shape selections are exported to this run folder: [selection]_passing_[observable].csv (every passing parameter set) and
+[selection]_selected_[observable]_by_[metric].csv (the best passing set of each architecture), with selection = shape or shape_nrmse.</p>
 {figures}
 <script>const DATA={data};</script><script>{EXPLORER_JS}</script><script>{REPORT_JS}</script></main></body></html>"""
     (run_dir / "results_report.html").write_text(page)
@@ -1099,7 +1150,7 @@ def main():
         old.unlink()
     plots = []      # figure files plus metric/top/page choices for the HTML selectors
 
-    def save(section, figure, name, title, caption, key=None, metric="", top="", page=""):
+    def save(section, figure, name, title, caption, key=None, metric="", top="", page="", selection=""):
         if figure is None:
             return
         stem = f"{len(plots) + 1:02d}_{name}"
@@ -1107,7 +1158,7 @@ def main():
         figure.savefig(folder / f"{stem}.png", dpi=PNG_DPI)
         plt.close(figure)
         plots.append(dict(section=section, stem=stem, title=title, caption=caption,
-                          key=key or name, metric=metric, top=str(top), page=str(page)))
+                          key=key or name, metric=metric, top=str(top), page=str(page), selection=selection))
 
     for metric, _ in FIT_METRICS:
         save("Best simulations", top_curves(table, curves, experiment, experiment_on, metric), f"top_simulations_{metric}",
@@ -1142,25 +1193,44 @@ def main():
                      "(left bar; neighbouring sub-types differ in colour) and sorted by fit within each sub-type, best on top. "
                      "Right bar: the fit (darker = better). Group heights grow with the logarithm of the row count.",
                      key=f"architectures_{observable}", metric=metric, top=top if top is not None else "all")
-            # Filter parameter sets BEFORE picking one best row per architecture. A model's overall best fit
-            # may fail the shape thresholds even when another of its parameter sets passes them.
-            qualifying = table.loc[table[f"hat_shape_{observable}"]]
-            selected = best_per_architecture(qualifying, column, ascending)
-            selected.drop(columns=["curve_row"] + BLOCKS, errors="ignore").to_csv(
-                run_dir / f"shape_selected_{observable}_by_{metric}.csv", index=False)
-            page_count = max(1, int(np.ceil(len(selected) / HAT_MODELS_PER_PAGE)))
-            for page_index in range(page_count):
-                page_rows = selected.iloc[page_index * HAT_MODELS_PER_PAGE:(page_index + 1) * HAT_MODELS_PER_PAGE]
-                title = (f"Threshold-qualified cross-correlations, {names[observable]}: {len(selected):,} architectures; "
-                         f"best qualifying set by {FIT_NAMES[metric]} · page {page_index + 1}/{page_count}")
-                save("Models passing the centre and both-flank thresholds",
-                     architecture_heatmap(title, page_rows, curves, experiment, observable, column, ascending, annotate_models=True),
-                     f"shape_selected_{observable}_{metric}_page{page_index + 1:03d}", title,
-                     f"Centre mean ≥ {HAT_CENTER_THRESHOLD:g}; left AND right flank means ≤ {HAT_FLANK_THRESHOLD:g}. "
-                     "One best qualifying parameter set per architecture, with its full model label at left. All qualifying "
-                     "architectures are included across the pages; the top-count selector does not truncate this selection. "
-                     f"Selected rows: shape_selected_{observable}_by_{metric}.csv.",
-                     key=f"shape_selected_{observable}", metric=metric, page=page_index + 1)
+        selections = shape_selections(table, observable)
+        for key, text, mask in selections:            # every passing parameter set, once per selection
+            table.loc[mask].drop(columns=["curve_row"] + BLOCKS, errors="ignore").to_csv(
+                run_dir / f"{key}_passing_{observable}.csv", index=False)
+        for metric, ascending in FIT_METRICS:
+            column = fit_column(metric, observable)
+            for key, text, mask in selections:
+                # Filter parameter sets BEFORE picking one best row per architecture: a model's overall best fit
+                # may fail the thresholds even when another of its parameter sets passes them.
+                selected = best_per_architecture(table.loc[mask], column, ascending)
+                selected.drop(columns=["curve_row"] + BLOCKS, errors="ignore").to_csv(
+                    run_dir / f"{key}_selected_{observable}_by_{metric}.csv", index=False)
+                section = "Models passing the shape selection"
+                which = "shape and NRMSE" if key == "shape_nrmse" else "shape"
+                plural = "architecture" + "s" * (len(selected) != 1)
+                title = (f"{names[observable].capitalize()}: {len(selected):,} {plural} passing the {which} selection, "
+                         f"best passing parameter set by {FIT_NAMES[metric]}")
+                save(section, architecture_heatmap(title, selected, curves, experiment, observable, column, ascending,
+                                                   pairs=three_curves if metric == "nrmse3" else ("EG",)),
+                     f"{key}_{observable}_by_{metric}", title,
+                     f"Selection: {text} ({int(mask.sum()):,} parameter sets). One row per architecture (source states and "
+                     "regulated rates) with its best passing parameter set; rows grouped by model group and sub-type and sorted by "
+                     f"fit within each sub-type, best on top. Rows: {key}_selected_{observable}_by_{metric}.csv; every passing set: "
+                     f"{key}_passing_{observable}.csv.",
+                     key=f"shape_overview_{observable}", metric=metric, selection=key)
+                if not SHAPE_LABELLED_PAGES:
+                    continue
+                page_count = max(1, int(np.ceil(len(selected) / HAT_MODELS_PER_PAGE)))
+                for page_index in range(page_count):
+                    page_rows = selected.iloc[page_index * HAT_MODELS_PER_PAGE:(page_index + 1) * HAT_MODELS_PER_PAGE]
+                    title = (f"{which.capitalize()} selection, {names[observable]}: {len(selected):,} {plural}; "
+                             f"best passing set by {FIT_NAMES[metric]} · page {page_index + 1}/{page_count}")
+                    save("Models passing the shape selection, labelled",
+                         architecture_heatmap(title, page_rows, curves, experiment, observable, column, ascending, annotate_models=True),
+                         f"{key}_{observable}_{metric}_page{page_index + 1:03d}", title,
+                         f"Selection: {text}. One best passing parameter set per architecture, with its full model label at left. "
+                         "All passing architectures are included across the pages; the top-count selector does not truncate them.",
+                         key=f"shape_selected_{observable}", metric=metric, page=page_index + 1, selection=key)
         save("Shape map", shape_map(table, observable, hat_experiment), f"shape_map_{observable}",
              f"Shape of the cross-correlation, {names[observable]}",
              "Each point is a parameter set's mean curve across replicate datasets. Blue = the named model family; grey = the full sweep. "
