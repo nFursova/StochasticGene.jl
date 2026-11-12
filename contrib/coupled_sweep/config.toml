@@ -16,18 +16,29 @@ trace_lengths = ""                                       # "" = every simulated 
 run_dir = "runs/grid"                # everything is written here
 
 [sweep]
-mode = "grid"                        # "grid":      every combination of the values below
-                                     # "extensive": n_extensive random combinations per model,
-                                     #              each parameter log-spaced between the smallest and largest value below
-coupling_fold = [3.0, 10.0, 30.0, 100.0]     # regulated rates are multiplied by this while the source is active
-hidden_rate = [0.01, 0.1, 1.0, 10.0]         # hidden-unit switching rates, per minute
+mode = "grid"                        # "grid" or "extensive"
+reciprocal_states = "same"           # reciprocal models: "same" = both directions use the same source state and the
+                                     # same fold; "all_pairs" = every pair of source states and every pair of folds
+
+# Grid sweep: every combination of these values.
+coupling_fold = [1.25, 2.0, 3.0, 10.0, 30.0, 100.0, 300.0]   # activation folds. Gene-to-gene models (E_to_G, G_to_E,
+                                     # reciprocal) are run with each fold and its inverse (1/fold = inhibition);
+                                     # hidden models with these folds only (a hidden unit only activates)
+hidden_rate = [0.01, 0.1, 1.0, 10.0] # hidden-unit switching rates, per minute
+
+# Extensive sweep: n_extensive random combinations per model; each parameter is log-spaced over its own [min, max].
 n_extensive = 100
-gene_inhibition = false              # true: gene-to-gene models (E_to_G, G_to_E, reciprocal) are also run with the inverse
-                                     # folds, so the regulated rates are divided by the fold. Not for hidden models (a hidden
-                                     # unit only activates) and not for source state R (the rate could go negative).
-reciprocal_states = "same"           # reciprocal models: "same" = both directions regulate from the same source state
-                                     # (1, 2, 3 or R); "all_pairs" = every pair of source states (4 times more models)
-seed = 1                             # random seed of the extensive sampling
+seed = 1                             # random seed of the sampling
+
+[sweep.extensive]
+fold_EG = [0.01, 100.0]              # fold of E regulating G (below 1 inhibits, above 1 activates)
+fold_GE = [0.01, 100.0]              # fold of G regulating E
+fold_HE = [1.0, 100.0]               # fold of the hidden unit regulating E: activation only, so 1 or above
+fold_HG = [1.0, 100.0]               # fold of the hidden unit regulating G: activation only, so 1 or above
+h12 = [0.001, 1000.0]                # hidden rate state 1 -> 2, per minute (H3: E-active state 1 -> inactive state 2)
+h21 = [0.001, 1000.0]                # hidden rate state 2 -> 1          (H3: inactive state 2 -> E-active state 1)
+h23 = [0.001, 1000.0]                # H3 only: inactive state 2 -> G-active state 3
+h32 = [0.001, 1000.0]                # H3 only: G-active state 3 -> inactive state 2
 
 [simulation]
 simulator = "fast"                   # "fast" or "stochasticgene"

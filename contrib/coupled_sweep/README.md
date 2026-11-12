@@ -91,30 +91,40 @@ Each swarm job writes one `curves_` and one `metrics_` file, named by its first 
 | Group | Coupling | Parameters swept |
 |---|---|---|
 | `uncoupled` | none (control) | none |
-| `E_to_G` | CCAT1 regulates MYC from one source state: promoter state 1, 2, 3, or R | fold |
-| `G_to_E` | MYC regulates CCAT1 from one source state: promoter state 1, 2, 3, or R | fold |
-| `reciprocal` | both directions, same fold; source states set by `reciprocal_states` (same state in both directions, or all pairs) | fold |
-| `H2` | hidden state 2 regulates both genes | fold, h12, h21 |
-| `H3_symmetric` | hidden state 1 regulates CCAT1, state 3 regulates MYC, state 2 nothing; h32 = h12, h23 = h21 | fold, h12, h21 |
-| `H3_asymmetric` | same; four independent rates | fold, h12, h21, h23, h32 |
+| `E_to_G` | CCAT1 regulates MYC from one source state: promoter state 1, 2, 3, or R | fold_EG |
+| `G_to_E` | MYC regulates CCAT1 from one source state: promoter state 1, 2, 3, or R | fold_GE |
+| `reciprocal` | both directions at once | fold_EG, fold_GE |
+| `H2` | hidden state 2 regulates both genes | fold_HE, fold_HG, h12, h21 |
+| `H3_symmetric` | hidden state 1 regulates CCAT1, state 3 regulates MYC, state 2 nothing; h32 = h12, h23 = h21 | fold_HE, fold_HG, h12, h21 |
+| `H3_asymmetric` | same; four independent rates | fold_HE, fold_HG, h12, h21, h23, h32 |
 
-- Regulated rates: each model multiplies one of nine rate sets by the fold: R12, R21, R23, R32,
+- Regulated rates: each connection multiplies one of nine rate sets by its fold: R12, R21, R23, R32,
   Initiate, R12+R23, R21+R32, R12+R23+Initiate, R21+R32+Initiate. Reciprocal models take every
-  pairing of the two directions (81 models).
+  pairing of the two directions' rate sets (81).
+- Fold: a regulated rate is multiplied by 1 + (fold − 1) for every active coupling effect. A fold above 1
+  activates, below 1 inhibits, 1 does nothing. Each kind of connection has its own fold column in
+  `simulations.csv`: `fold_EG` (E regulates G), `fold_GE`, `fold_HE`, `fold_HG`.
+- Gene-to-gene models (`E_to_G`, `G_to_E`, `reciprocal`) are run with every fold and its inverse.
+  Hidden models only activate.
+- Reciprocal models, `[sweep] reciprocal_states`: `"same"` uses the same source state and the same fold in
+  both directions; `"all_pairs"` uses every pair of source states and every pair of folds, so one direction
+  can activate while the other inhibits.
 - Source state R is StochasticGene's `Rsum`: every occupied reporter position of the source gene adds one
   coupling effect, so the rate is multiplied by 1 + (fold − 1) × (number of occupied positions).
-- Controls: every group also has one model with fold 1 (gamma = 0).
-- Inhibition (`[sweep] gene_inhibition = true`): gene-to-gene models are also run with the inverse folds, so the
-  regulated rates are divided by the fold. Hidden models only activate. Source state R is activation only,
-  because every occupied position adds fold − 1 and the rate would go negative for folds below 2/3.
-- Every coupled rate must stay positive; the simulation script stops with an error otherwise.
+- Clipping: a multiplier that would go below 0.000001 (inhibition from R: fold 0.5 with three positions gives
+  1 − 1.5) is held at 0.000001 (`MIN_FACTOR` at the top of `3_run_simulations.jl`), in the rate matching and in
+  both simulators. For StochasticGene the script replaces the package's internal check when it starts; the
+  installed package is not changed. Such simulations are marked `clipped = 1` in the metrics files.
+- Controls: every group also has one model with all folds 1 (gamma = 0).
 - Rate matching (`[simulation] rate_matching`): base rates are rescaled so that each regulated rate still
   averages to its fitted value. `"time_average"` averages over all time, as in the original sweep; coupling
   can then still shift a gene's ON fraction. `"state_average"` averages over the time when the gene is in
   the state where that rate can act, which keeps ON fractions close to the uncoupled fit.
-- `grid`: every combination of the listed fold and hidden-rate values.
-- `extensive`: 100 random combinations per model. Each parameter takes 100 log-spaced values over
-  the same range, each used once.
+- `grid`: every combination of `coupling_fold` (and its inverses, for gene-to-gene models) and `hidden_rate`.
+  Hidden models use one fold for both connections.
+- `extensive`: `n_extensive` random combinations per model. Each parameter is log-spaced over its own
+  [min, max] in `[sweep.extensive]`, each value used once; the hidden unit's two folds are sampled
+  independently. In `"same"` reciprocal models the shared fold uses the `fold_EG` range.
 
 ## The two simulators
 

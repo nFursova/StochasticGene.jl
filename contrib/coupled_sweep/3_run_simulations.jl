@@ -10,8 +10,9 @@ Each run writes two files into <run_dir>/results/:
     curves_<first>-<last>.csv    the six correlation curves of every simulation: mean and SE over replicates,
                                  and every replicate (columns rep1, rep2, ...)
     metrics_<first>-<last>.csv   one row per simulation: ON fractions, mean reporter counts, NRMSE and CCC,
-                                 the base rates (rates while no source is active), and the ON fractions and
-                                 reporter counts of every replicate (columns on_E_rep1, ...)
+                                 the base rates (rates while no source is active), the ON fractions and
+                                 reporter counts of every replicate (columns on_E_rep1, ...), and clipped (1 if a
+                                 rate multiplier would have gone below MIN_FACTOR and was held there)
 
 Names: E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit. Both genes are the 3301 model:
 promoter states 1 <-> 2 <-> 3, initiation from state 3, three reporter positions.
@@ -23,6 +24,7 @@ const RATE_NAMES = ["R12", "R21", "R23", "R32", "Initiate", "Rshift1", "Rshift2"
 const GENE_TRANSITIONS = ((1, 2), (2, 1), (2, 3), (3, 2))    # promoter transitions, in the order of R12 R21 R23 R32
 const OBSERVABLES = ("binary", "reporter")                   # binary = ON/OFF state, reporter = reporter count
 const PAIRS = (("EE", 1, 1), ("GG", 2, 2), ("EG", 1, 2))     # autocorrelation of E, of G, and E x G cross-correlation
+const MIN_FACTOR = 1e-6       # a coupled rate is never multiplied by less than this (keeps every rate positive)
 
 # ---------------------------------------------------------------------------
 # 1. Inputs
@@ -82,6 +84,7 @@ struct Edge
                    # every occupied reporter position of the source gene adds one coupling effect
     target::Int    # 1 = E, 2 = G
     rate::Int      # index into RATE_NAMES
+    gamma::Float64 # fold - 1 of this connection (fold_EG, fold_GE, fold_HE or fold_HG)
 end
 
 struct Model
@@ -89,8 +92,8 @@ struct Model
     nh::Int                         # hidden states: 1 = no hidden unit, 2 = H2, 3 = H3
     hidden_rates::Vector{Float64}   # h12 h21 (H2) or h12 h21 h23 h32 (H3), per minute
     edges::Vector{Edge}
-    gamma::Float64                  # fold - 1
     base::Matrix{Float64}           # 2 x 9 rates while no source is active: row 1 = E, row 2 = G
+    clipped::Bool                   # does the multiplier reach MIN_FACTOR in some state?
 end
 
 # A state of the whole system is (p, bits_E, bits_G):
@@ -112,11 +115,17 @@ function activity(edge, p, bits_E, bits_G)
     Int(pstate(p)[edge.source] == edge.state)
 end
 
-"Multiplier of rate k of gene u in state (p, bits_E, bits_G): 1 + gamma for every active coupling effect onto it."
-function factor(model, p, bits_E, bits_G, u, k)
+"""
+Multiplier of rate k of gene u in state (p, bits_E, bits_G): 1 + gamma for every active coupling effect onto it,
+but never below MIN_FACTOR. Clipping only happens with inhibition from source state R, where every occupied
+reporter position adds fold - 1: at fold 0.5 three occupied positions would give 1 - 1.5 < 0.
+"""
+factor(model, p, bits_E, bits_G, u, k) = max(MIN_FACTOR, unclipped_factor(model.edges, p, bits_E, bits_G, u, k))
+
+function unclipped_factor(edges, p, bits_E, bits_G, u, k)
     f = 1.0
-    for edge in model.edges
-        edge.target == u && edge.rate == k && (f += model.gamma * activity(edge, p, bits_E, bits_G))
+    for edge in edges
+        edge.target == u && edge.rate == k && (f += edge.gamma * activity(edge, p, bits_E, bits_G))
     end
     f
 end
@@ -221,26 +230,20 @@ end
 function build_model(row, fitted, matching)
     nh = row["hidden"] == "none" ? 1 : row["hidden"] == "H2" ? 2 : 3
     edges = Edge[]
-    function connect(column, source, state, target)
+    function connect(column, source, state, target, fold)        # fold: the simulations.csv column with this connection's fold
         for name in split(row[column], '+'; keepempty=false)
-            push!(edges, Edge(source, state, target, findfirst(==(name), RATE_NAMES)))
+            push!(edges, Edge(source, state, target, findfirst(==(name), RATE_NAMES), parse(Float64, row[fold]) - 1))
         end
     end
     gene_state(text) = text == "R" ? 4 : parse(Int, text)                               # EG_state / GE_state: 1, 2, 3 or R (Rsum)
-    isempty(row["EG_rates"]) || connect("EG_rates", 1, gene_state(row["EG_state"]), 2)   # E regulates G
-    isempty(row["GE_rates"]) || connect("GE_rates", 2, gene_state(row["GE_state"]), 1)   # G regulates E
-    connect("HE_rates", 3, nh == 2 ? 2 : 1, 1)        # H2: hidden state 2 regulates both genes
-    connect("HG_rates", 3, nh == 2 ? 2 : 3, 2)        # H3: hidden state 1 regulates E, state 3 regulates G
+    isempty(row["EG_rates"]) || connect("EG_rates", 1, gene_state(row["EG_state"]), 2, "fold_EG")   # E regulates G
+    isempty(row["GE_rates"]) || connect("GE_rates", 2, gene_state(row["GE_state"]), 1, "fold_GE")   # G regulates E
+    connect("HE_rates", 3, nh == 2 ? 2 : 1, 1, "fold_HE")        # H2: hidden state 2 regulates both genes
+    connect("HG_rates", 3, nh == 2 ? 2 : 3, 2, "fold_HG")        # H3: hidden state 1 regulates E, state 3 regulates G
     hidden_rates = Float64[parse(Float64, row[name]) for name in ("h12", "h21", "h23", "h32")[1:2*(nh-1)]]
-    model = Model(row["model_id"], nh, hidden_rates, edges, parse(Float64, row["fold"]) - 1, copy(fitted))
-    # Every coupled rate must stay positive (StochasticGene requires the same). A fold below 1 is fine from a
-    # promoter or hidden state. From source state R every occupied reporter position adds fold - 1, so a fold
-    # below 2/3 would make the rate negative with all three positions occupied.
-    for (u, k) in unique([(edge.target, edge.rate) for edge in edges]), s in 1:64*npromoter(model)
-        factor(model, sstate(model, s)..., u, k) > 0 || error(
-            "$(model.id), fold $(row["fold"]): the multiplier of $(RATE_NAMES[k]) would be zero or negative in some state. " *
-            "With source state R, folds below 2/3 are not possible.")
-    end
+    clipped = any(unclipped_factor(edges, p, bits_E, bits_G, edge.target, edge.rate) < MIN_FACTOR
+                  for edge in edges, p in 1:9*nh, bits_E in 0:7, bits_G in 0:7)
+    model = Model(row["model_id"], nh, hidden_rates, edges, copy(fitted), clipped)
     model.base .= base_rates(model, fitted, matching)
     model
 end
@@ -305,16 +308,16 @@ function simulate_stochasticgene(model, cfg)
     gammas = Float64[]                  # one coupling strength per connection
     for edge in model.edges
         if edge.source != 3 && edge.state == 1
-            base[edge.target, edge.rate] *= 1 + model.gamma
+            base[edge.target, edge.rate] *= 1 + edge.gamma
             for state in (2, 3)
                 push!(connections, (unit(edge.source), state, unit(edge.target), edge.rate))
-                push!(gammas, 1 / (1 + model.gamma) - 1)
+                push!(gammas, 1 / (1 + edge.gamma) - 1)
             end
         else
             states = edge.source == 3 ? (renumber(edge.state),) : edge.state == 4 ? (4, 5, 6) : (edge.state,)
             for state in states
                 push!(connections, (unit(edge.source), state, unit(edge.target), edge.rate))
-                push!(gammas, model.gamma)
+                push!(gammas, edge.gamma)
             end
         end
     end
@@ -516,6 +519,8 @@ mean_se(values) = (mean(values), std(values) / sqrt(length(values)))
 "Simulate rows first_id to last_id of simulations.csv and write their curves and metrics."
 function run_simulations(rows, cfg, first_id, last_id)
     models = [build_model(row, cfg.fitted, cfg.rate_matching) for row in rows]
+    nclipped = count(model -> model.clipped, models)
+    nclipped > 0 && println("$nclipped of $(length(models)) simulations have a rate multiplier clipped at $MIN_FACTOR")
     jobs = [(i, replicate) for i in eachindex(rows) for replicate in 1:cfg.replicates]
     results = Vector{Any}(undef, length(jobs))
     Threads.@threads :dynamic for j in eachindex(jobs)
@@ -536,7 +541,7 @@ function run_simulations(rows, cfg, first_id, last_id)
         open(metrics_path * ".tmp", "w") do metrics_io
             println(curves_io, "sim_id,observable,pair,lag_frames,lag_min,mean,se," * join(["rep$r" for r in 1:cfg.replicates], ','))
             println(metrics_io, "sim_id,model_id,on_E,on_E_se,on_G,on_G_se,reporters_E,reporters_E_se," *
-                                "reporters_G,reporters_G_se," * join(vcat(score_names, base_names, replicate_names), ','))
+                                "reporters_G,reporters_G_se," * join(vcat(score_names, base_names, replicate_names, "clipped"), ','))
             for (i, row) in enumerate(rows)
                 replicates = results[(i - 1) * cfg.replicates .+ (1:cfg.replicates)]
                 bins = replicates[1].curves                                   # same lag bins in every replicate
@@ -561,6 +566,7 @@ function run_simulations(rows, cfg, first_id, last_id)
                 for k in 1:4                                                  # the same four metrics, every replicate
                     append!(cells, fmt.([r.metrics[k] for r in replicates]))
                 end
+                push!(cells, models[i].clipped ? "1" : "0")
                 println(metrics_io, join(cells, ','))
             end
         end
@@ -591,6 +597,25 @@ const CONFIG = read_config(ARGS[1])
 const ROWS = read_csv(joinpath(CONFIG.run_dir, "simulations.csv"))
 if CONFIG.simulator == "stochasticgene" && !("--swarm" in ARGS)
     using StochasticGene
+    # StochasticGene stops when a coupled rate's multiplier (1 + sum of the active gammas) is not positive.
+    # Replace that one internal function, for this run only, so that the multiplier is clipped at MIN_FACTOR,
+    # exactly as in the fast simulator. The installed package is not changed.
+    isdefined(StochasticGene, :_coupling_factor_for_target) && isdefined(StochasticGene, :_source_occupied) || error(
+        "this StochasticGene version does not have the internal function that this script replaces to clip multipliers")
+    @eval StochasticGene function _coupling_factor_for_target(state, target::Int, coupling_strength,
+            connections, G, R, S; target_transition::Union{Nothing,Int}=nothing,
+            override_unit::Int=0, override_state=nothing)
+        factor = 1.0
+        for (k, (source, source_state, connection_target, connection_transition)) in enumerate(connections)
+            connection_target == target || continue
+            isnothing(target_transition) || connection_transition == target_transition || continue
+            source_vector = source == override_unit ? override_state : state[source, 1]
+            occupied = _source_occupied(findall(!iszero, vec(source_vector)), [source_state],
+                                        G[source], R[source], S[source] > 0 ? 3 : 2)
+            occupied && (factor += coupling_strength[k])
+        end
+        return max(factor, $MIN_FACTOR)
+    end
 end
 if "--swarm" in ARGS
     write_swarm(ARGS[1], CONFIG, length(ROWS))

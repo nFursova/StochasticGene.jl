@@ -9,7 +9,9 @@ schematic, the rates that are regulated, and the parameter values that are teste
 import csv, html, sys, tomllib
 from pathlib import Path
 
-PARAMETERS = {"fold": "coupling fold", "h12": "hidden rate h12 (1 → 2), per min", "h21": "hidden rate h21 (2 → 1), per min",
+PARAMETERS = {"fold_EG": "fold of E regulating G", "fold_GE": "fold of G regulating E",
+              "fold_HE": "fold of H regulating E", "fold_HG": "fold of H regulating G",
+              "h12": "hidden rate h12 (1 → 2), per min", "h21": "hidden rate h21 (2 → 1), per min",
               "h23": "hidden rate h23 (2 → 3), per min", "h32": "hidden rate h32 (3 → 2), per min"}
 
 GROUP_TEXT = {
@@ -18,9 +20,11 @@ GROUP_TEXT = {
               "of G by the fold; R (StochasticGene's Rsum) adds one coupling effect per occupied reporter position.",
     "G_to_E": "MYC (G) regulates CCAT1 (E) from one source state: promoter state 1, 2 or 3 multiplies the chosen rates "
               "of E by the fold; R (StochasticGene's Rsum) adds one coupling effect per occupied reporter position.",
-    "reciprocal": "Both directions at once, with the same fold. Each direction has its own choice of rates "
-                  "and regulates from source state 1, 2, 3 or R.",
-    "H2": "Two-state hidden unit. While it is in state 2, the chosen rates of both genes are multiplied by the fold.",
+    "reciprocal": "Both directions at once. Each direction has its own choice of rates and regulates from source state "
+                  "1, 2, 3 or R. The two directions use the same source state and fold, or every pair of them "
+                  "(setting reciprocal_states); the parameters below show which.",
+    "H2": "Two-state hidden unit. While it is in state 2, the chosen rates of both genes are multiplied by the fold "
+          "(activation only).",
     "H3_symmetric": "Three-state hidden unit, mirror-symmetric rates (h23 = h21, h32 = h12). "
                     "State 1 multiplies the chosen rates of E, state 3 those of G; state 2 regulates nothing.",
     "H3_asymmetric": "Three-state hidden unit with four independent rates. "
@@ -227,7 +231,8 @@ def main():
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Coupled-model sweep</title><style>{STYLE}</style></head>
 <body>{MARKERS}<main><h1>Coupled-model sweep: what will be simulated</h1>
 <p class="sub">{len(models)} models · {total:,} simulations × {replicates} replicate datasets · sweep mode: {mode} ·
-E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit. "× fold" multiplies the chosen rates while the source is in the marked state.</p>
+E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit. "× fold" multiplies the chosen rates while the source is in its regulating state:
+fold above 1 activates, fold below 1 inhibits. Gene-to-gene models are tested with every fold and its inverse; hidden models only activate.</p>
 <table class="overview"><tr><th>Group</th><th class="n">Models</th><th>Parameters swept</th><th class="n">Parameter sets per model</th>
 <th class="n">Fold-1 controls</th><th class="n">Simulations</th></tr>{"".join(overview)}
 <tr><td>Total</td><td class="n"></td><td></td><td class="n"></td><td class="n"></td><td class="n">{total:,}</td></tr></table>

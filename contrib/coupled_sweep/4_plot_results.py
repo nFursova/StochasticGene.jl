@@ -61,7 +61,7 @@ METRICS = [(f"{name}_{observable}{pair}", f"{title}, {observable_name}", scale)
                ("nrmse", "_EG", "NRMSE of the cross-correlation (0 = identical to experiment)", "log"),
                ("ccc", "_EG", "CCC of the cross-correlation (1 = identical to experiment)", "linear"),
                ("hat", "", "Mexican-hat depth of the cross-correlation (centre minus flanks)", "linear")]]
-PARAMETERS = ["fold", "h12", "h21", "h23", "h32"]
+PARAMETERS = ["fold_EG", "fold_GE", "fold_HE", "fold_HG", "h12", "h21", "h23", "h32"]    # columns of simulations.csv
 RATES = ["R12", "R21", "R23", "R32", "Initiate"]                      # the rates a connection can regulate
 BASE_COLUMNS = [f"base_{gene}_{rate}" for gene in "EG" for rate in RATES]
 INK, MUTED, BLUE = "#0b0b0b", "#898781", "#2a78d6"
@@ -148,10 +148,10 @@ def regulated_rates(sim):
     """Which rates a model regulates, and which unit and state regulates each."""
     hidden_states = ("H state 2", "H state 2") if sim["hidden"] == "H2" else ("H state 1", "H state 3")
     regulated = []
-    for column, gene, source in [("GE_rates", "E", f'G state {sim["GE_state"]}'), ("HE_rates", "E", hidden_states[0]),
-                                 ("EG_rates", "G", f'E state {sim["EG_state"]}'), ("HG_rates", "G", hidden_states[1])]:
+    for column, gene, source, fold in [("GE_rates", "E", f'G state {sim["GE_state"]}', "fold_GE"), ("HE_rates", "E", hidden_states[0], "fold_HE"),
+                                       ("EG_rates", "G", f'E state {sim["EG_state"]}', "fold_EG"), ("HG_rates", "G", hidden_states[1], "fold_HG")]:
         if pd.notna(sim[column]):
-            regulated += [dict(gene=gene, rate=rate, by=source, index=BASE_COLUMNS.index(f"base_{gene}_{rate}"))
+            regulated += [dict(gene=gene, rate=rate, by=source, fold=fold, index=BASE_COLUMNS.index(f"base_{gene}_{rate}"))
                           for rate in sim[column].split("+")]
     return regulated
 
@@ -398,11 +398,13 @@ def metric_by_group(table, column, title, scale, reference=None):
 def metric_vs_parameters(table, column, scale):
     """One metric against each swept parameter, one row of panels per model group; the line joins the medians."""
     groups = [g for g in dict.fromkeys(table["group"]) if free_parameters(table[table["group"] == g])]
-    figure, axes = plt.subplots(len(groups), len(PARAMETERS), figsize=(11, 1.55 * len(groups) + 0.9), sharey=True, squeeze=False)
+    shown = [name for name in PARAMETERS if any(name in free_parameters(table[table["group"] == g]) for g in groups)]
+    figure, axes = plt.subplots(len(groups), len(shown), figsize=(2.2 * len(shown) + 0.8, 1.55 * len(groups) + 0.9),
+                                sharey=True, squeeze=False)
     for row, group in enumerate(groups):
         rows = table[table["group"] == group]
         free = free_parameters(rows)
-        for position, name in enumerate(PARAMETERS):
+        for position, name in enumerate(shown):
             axis = axes[row, position]
             if name not in free:
                 axis.set_visible(False)
@@ -509,7 +511,7 @@ select{font:inherit;font-size:14px;padding:5px 6px;max-width:340px;color:var(--i
 
 # The interactive explorer: choose a curve, a model and the parameter to vary; the other parameters are held fixed.
 EXPLORER_JS = r"""
-const $ = id => document.getElementById(id), NAMES = ["fold", "h12", "h21", "h23", "h32"];
+const $ = id => document.getElementById(id);
 const groups = [...new Set(Object.values(DATA.models).map(m => m.group))];
 const options = (select, values, labels) => { select.innerHTML = values.map((v, i) => `<option value="${v}">${labels ? labels[i] : v}</option>`).join(""); };
 const distinct = (sims, name) => [...new Set(sims.map(s => s.par[name]))].sort((a, b) => a - b);
@@ -540,7 +542,7 @@ function varyChanged() {                        // one selector for every other 
   $("fixed").innerHTML = "";
   for (const name of DATA.models[$("model").value].free.filter(n => n !== vary)) {
     const values = distinct(sims, name);
-    if (values.length > 12) continue;
+    if (values.length > 20) continue;
     const label = document.createElement("label");
     label.innerHTML = `hold ${name} at<select data-name="${name}"></select>`;
     options(label.firstElementChild, values);
@@ -580,7 +582,7 @@ function draw() {
   const item = (color, text) => `<span><i style="background:${color}"></i>${text}</span>`;
   let legend = item("var(--ink)", "experiment ± SE") + (control ? item("var(--muted)", "uncoupled control") : "");
   if (sims.length > 12) legend += item(shade(0), `${sims.length} simulations, ${vary} from ${sims[0].par[vary].toPrecision(3)} (light)`) + item(shade(1), `to ${sims[sims.length - 1].par[vary].toPrecision(3)} (dark)`);
-  else sims.forEach((s, i) => { legend += item(shade(sims.length > 1 ? i / (sims.length - 1) : 0.6), `${vary ? vary + " " + s.par[vary] : "fold 1"} · simulation ${s.id} · NRMSE ${s.nrmse[curve] === null ? "n/a" : s.nrmse[curve].toFixed(3)}`); });
+  else sims.forEach((s, i) => { legend += item(shade(sims.length > 1 ? i / (sims.length - 1) : 0.6), `${vary ? vary + " " + s.par[vary] : "control (fold 1)"} · simulation ${s.id} · NRMSE ${s.nrmse[curve] === null ? "n/a" : s.nrmse[curve].toFixed(3)}`); });
   $("legend").innerHTML = legend;
   rateTable(sims, vary);
 }
@@ -592,7 +594,7 @@ function rateTable(sims, vary) {                // the regulated rates of the dr
   for (const r of regulated) {
     const fitted = DATA.fitted[r.index];
     rows += `<tr><td>${r.gene === "E" ? "CCAT1" : "MYC"} ${r.rate}</td><td>${r.by}</td><td>${f(fitted)}</td>` + sims.map(s => {
-      const base = s.base[r.index], fold = s.par.fold, activity = (fitted / base - 1) / (fold - 1);
+      const base = s.base[r.index], fold = s.par[r.fold], activity = (fitted / base - 1) / (fold - 1);
       const when = r.by.endsWith(" R") ? ` per occupied reporter position (mean ${activity.toFixed(2)} occupied)` : ` (${(100 * activity).toFixed(0)}% of the time)`;
       return `<td>${f(base)} → ${f(base * fold)}` + (fold !== 1 ? when : "") + "</td>";
     }).join("") + "</tr>";
