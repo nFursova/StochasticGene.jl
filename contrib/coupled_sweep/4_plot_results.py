@@ -12,7 +12,7 @@ Reads <run_dir>/simulations.csv and <run_dir>/results/, and writes into <run_dir
 
 Heatmap rows are simulations, grouped by model group, then model, then parameters.
 """
-import html, json, os, sys, tomllib
+import html, inspect, json, os, sys, tomllib
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import numpy as np
@@ -25,6 +25,9 @@ from matplotlib.colors import LinearSegmentedColormap
 PLOT_MAX_LAG_MIN = 120      # lag range shown in every plot
 TOP_N = 10                  # number of best simulations shown as line plots and in the table
 PNG_DPI = 600
+A4 = (8.27, 11.69)          # page size of the heatmaps, inches
+HAT_CENTER_MIN = 10         # Mexican-hat shape: the cross-correlation should be positive within +/- this many minutes
+HAT_FLANKS_MIN = (20, 60)   # and negative between these lags (minutes) on both sides
 
 SCORE_NAME = "NRMSE of the reporter-count cross-correlation"
 
@@ -36,6 +39,10 @@ def score(metrics):
         nrmse_<observable>_<pair>   0 = identical to experiment
         ccc_<observable>_<pair>     1 = identical to experiment
         on_E, on_G, reporters_E, reporters_G
+        center_<observable>, left_<observable>, right_<observable>   mean cross-correlation within +/- HAT_CENTER_MIN
+                                    and in the left and right flanks (HAT_FLANKS_MIN)
+        hat_<observable>            Mexican-hat depth: center minus the mean of the two flanks
+        hat_shape_<observable>      True if center > 0 and both flanks < 0
     observable: binary (ON/OFF state) or reporter (reporter count)
     pair:       EG (CCAT1 x MYC cross-correlation), EE (CCAT1 autocorrelation), GG (MYC autocorrelation)
     Example of a combined score:  metrics["nrmse_reporter_EG"] + metrics["nrmse_binary_EG"]
@@ -47,6 +54,13 @@ CURVES = [(observable, pair, f"{pair_name}, {observable_name}")
           for pair, pair_name in [("EG", "CCAT1 x MYC cross-correlation"), ("EE", "CCAT1 autocorrelation"),
                                   ("GG", "MYC autocorrelation")]
           for observable, observable_name in [("binary", "ON/OFF state"), ("reporter", "reporter count")]]
+# The metrics drawn per model group (violins) and against every swept parameter: (column, title, axis scale).
+METRICS = [(f"{name}_{observable}{pair}", f"{title}, {observable_name}", scale)
+           for observable, observable_name in [("reporter", "reporter count"), ("binary", "ON/OFF state")]
+           for name, pair, title, scale in [
+               ("nrmse", "_EG", "NRMSE of the cross-correlation (0 = identical to experiment)", "log"),
+               ("ccc", "_EG", "CCC of the cross-correlation (1 = identical to experiment)", "linear"),
+               ("hat", "", "Mexican-hat depth of the cross-correlation (centre minus flanks)", "linear")]]
 PARAMETERS = ["fold", "h12", "h21", "h23", "h32"]
 RATES = ["R12", "R21", "R23", "R32", "Initiate"]                      # the rates a connection can regulate
 BASE_COLUMNS = [f"base_{gene}_{rate}" for gene in "EG" for rate in RATES]
@@ -108,14 +122,15 @@ def load(config_path):
     experiment_on = pd.read_csv(folder / config["inputs"]["experimental_metrics"]).set_index("metric")["mean"]
     # One row per simulation: parameters, metrics, score, rank (1 = best) and where its curves are in `curves`.
     table = simulations.merge(metrics, on=["sim_id", "model_id"]).sort_values("sim_id").reset_index(drop=True)
+    table["curve_row"] = curves.position.reindex(table["sim_id"]).to_numpy()
+    hat_experiment = add_hat_metrics(table, curves, experiment)
     table["score"] = score(table)
     table["rank"] = table["score"].rank(method="first").astype("Int64")
-    table["curve_row"] = curves.position.reindex(table["sim_id"]).to_numpy()
     done = f'{len(table):,} of {len(simulations):,} simulations have results'
     print(done)
     statistic = config["inputs"]["rate_statistic"]
     fitted = read_rates(folder / config["inputs"]["rates_E"], statistic) + read_rates(folder / config["inputs"]["rates_G"], statistic)
-    return config, run_dir, table, curves, experiment, experiment_on, done, fitted
+    return config, run_dir, table, curves, experiment, experiment_on, done, fitted, hat_experiment
 
 
 def read_rates(path, statistic):
@@ -148,6 +163,38 @@ def experiment_curve(experiment, observable, pair, lag_frames):
     return part["mean"].to_numpy(), part["se"].to_numpy()
 
 
+def mean_curves(curves, table, rows):
+    """The mean curve (over replicates) of every simulation of `table`: array [simulation, lag]."""
+    return curves.values[table["curve_row"].to_numpy()[:, None], rows[None, :], 0]
+
+
+def add_hat_metrics(table, curves, experiment):
+    """Add the Mexican-hat metrics of the cross-correlation to `table` (see score() for the column names)
+    and return the same quantities for the experiment: {observable: {center, left, right, hat}}."""
+    reference = {}
+    for observable in ("binary", "reporter"):
+        rows, lag_frames, lags = curves.rows(observable, "EG")
+        windows = dict(center=np.abs(lags) <= HAT_CENTER_MIN,
+                       left=(lags >= -HAT_FLANKS_MIN[1]) & (lags <= -HAT_FLANKS_MIN[0]),
+                       right=(lags >= HAT_FLANKS_MIN[0]) & (lags <= HAT_FLANKS_MIN[1]))
+        simulated, target = mean_curves(curves, table, rows), experiment_curve(experiment, observable, "EG", lag_frames)[0]
+        for name, window in windows.items():
+            table[f"{name}_{observable}"] = np.nanmean(simulated[:, window], axis=1)
+        center, left, right = (table[f"{name}_{observable}"] for name in windows)
+        table[f"hat_{observable}"] = center - (left + right) / 2
+        table[f"hat_shape_{observable}"] = (center > 0) & (left < 0) & (right < 0)
+        reference[observable] = {name: float(np.nanmean(target[window])) for name, window in windows.items()}
+        reference[observable]["hat"] = reference[observable]["center"] - (reference[observable]["left"] + reference[observable]["right"]) / 2
+    return reference
+
+
+def sorted_within_groups(table, column, ascending=True):
+    """`table` with the order of the model groups kept and the simulations of each group sorted by `column`."""
+    order = {group: i for i, group in enumerate(dict.fromkeys(table["group"]))}
+    return (table.assign(group_order=table["group"].map(order))
+            .sort_values(["group_order", column], ascending=[True, ascending]).drop(columns="group_order"))
+
+
 def free_parameters(rows):
     """The parameters that vary among these simulations, leaving out those tied to an earlier parameter."""
     free = []
@@ -170,49 +217,93 @@ def bin_edges(centers):
     return np.concatenate([[2 * centers[0] - middle[0]], middle, [2 * centers[-1] - middle[-1]]])
 
 
-def heatmap(title, table, values, x_edges, limit, colorbar_label, top_row=None, x_label="", x_ticks=None):
-    """A panel per model group, rows = that group's simulations in sim_id order; top_row = experiment.
-    values: array [simulation, heatmap column], in the order of `table`."""
-    groups = list(dict.fromkeys(table["group"]))
-    heights = ([0.35] if top_row is not None else []) + [1] * len(groups)
-    figure, axes = plt.subplots(len(heights), 1, figsize=(7.5, 9.5), gridspec_kw=dict(height_ratios=heights, hspace=0.12),
-                                squeeze=False)
-    axes = list(axes[:, 0])
-    style = dict(cmap=DIVERGING, vmin=-limit, vmax=limit)
-    if top_row is not None:
-        mesh = axes[0].pcolorfast(x_edges, [0, 1], np.ma.masked_invalid(top_row[None, :]), **style)
-        axes[0].set_ylabel("experiment", rotation=0, ha="right", va="center", fontweight="bold")
-    for axis, group in zip(axes[len(heights) - len(groups):], groups):
-        rows = table[table["group"] == group]
-        block = values[(table["group"] == group).to_numpy()]
-        mesh = axis.pcolorfast(x_edges, np.arange(len(rows) + 1), np.ma.masked_invalid(block), **style)
-        axis.invert_yaxis()                                     # first simulation of the group on top
-        models = rows["model_id"].to_numpy()
-        boundaries = np.flatnonzero(models[1:] != models[:-1]) + 1
-        if len(boundaries) <= 12:                               # thin lines between the group's models
-            axis.hlines(boundaries, x_edges[0], x_edges[-1], color="white", linewidth=0.6)
-        axis.set_ylabel(f"{group}\n{len(rows)} simulation{'s' * (len(rows) > 1)}", rotation=0, ha="right", va="center")
-    for axis in axes:
-        axis.set_yticks([])
-        axis.tick_params(labelbottom=axis is axes[-1], length=3, colors=MUTED, labelcolor=INK)
-        if x_ticks is not None:
-            axis.set_xticks(*x_ticks)
-        for spine in axis.spines.values():
-            spine.set_visible(False)
-    axes[-1].set_xlabel(x_label)
-    figure.suptitle(title, x=0.06, ha="left", fontsize=12, fontweight="bold")
-    figure.subplots_adjust(left=0.27, right=0.86, top=0.94, bottom=0.06)
-    figure.colorbar(mesh, cax=figure.add_axes([0.89, 0.3, 0.018, 0.4]), label=colorbar_label, extend="both")
+def heatmap_figure(title, panels, x_edges, limit, colorbar_label, column_titles=("",), x_label="", x_ticks=None, row_labels=None):
+    """An A4 page of heatmap panels stacked vertically, with one or more columns.
+
+    panels: dictionaries with label, height (relative), arrays (one [row, heatmap column] array per column) and
+    optionally lines (per column, the rows above which a thin separating line is drawn).
+    row_labels: (positions, texts) written beside the rows of the first column of the last panel."""
+    figure, axes = plt.subplots(len(panels), len(column_titles), figsize=A4, squeeze=False,
+                                gridspec_kw=dict(height_ratios=[panel["height"] for panel in panels], hspace=0.07, wspace=0.05))
+    for i, panel in enumerate(panels):
+        for j, values in enumerate(panel["arrays"]):
+            axis = axes[i, j]
+            image = axis.pcolorfast(x_edges, np.arange(len(values) + 1), np.ma.masked_invalid(values),
+                                    cmap=DIVERGING, vmin=-limit, vmax=limit)
+            axis.invert_yaxis()                                     # first row on top
+            lines = panel.get("lines", [[]] * len(panel["arrays"]))[j]
+            axis.hlines(lines, x_edges[0], x_edges[-1], color="white", linewidth=0.5)
+            axis.set_yticks([])
+            axis.tick_params(labelbottom=i == len(panels) - 1, length=3, colors=MUTED, labelcolor=INK, labelsize=7)
+            if x_ticks is not None:
+                axis.set_xticks(*x_ticks)
+            for spine in axis.spines.values():
+                spine.set_visible(False)
+        axes[i, 0].set_ylabel(panel["label"], rotation=0, ha="right", va="center", fontsize=8)
+    for axis, text in zip(axes[0], column_titles):
+        axis.set_title(text, fontsize=8)
+    for axis in axes[-1]:
+        axis.set_xlabel(x_label, fontsize=8)
+    if row_labels is not None:
+        axes[-1, 0].set_yticks(row_labels[0], row_labels[1], fontsize=5)
+        axes[-1, 0].tick_params(axis="y", length=0)
+    figure.suptitle(title, x=0.04, ha="left", fontsize=11, fontweight="bold")
+    figure.subplots_adjust(left=0.24, right=0.87, top=0.95, bottom=0.05)
+    figure.colorbar(image, cax=figure.add_axes([0.9, 0.35, 0.015, 0.3]), label=colorbar_label, extend="both")
     return figure
 
 
-def curve_heatmap(table, curves, experiment, observable, pair, name):
+def overview_heatmap(title, table, values, x_edges, limit, colorbar_label, top_row=None, **options):
+    """Every model group on one page, rows in the order of `table` (values = array [simulation, heatmap column]).
+    A panel of 1 simulation is as high as the experiment strip; bigger groups are higher, but not to scale."""
+    panels = [] if top_row is None else [dict(label="experiment", height=1, arrays=[top_row[None, :]])]
+    for group in dict.fromkeys(table["group"]):
+        inside = (table["group"] == group).to_numpy()
+        models = table["model_id"].to_numpy()[inside]
+        lines = np.flatnonzero(models[1:] != models[:-1]) + 1                       # where the model changes
+        count = int(inside.sum())
+        panels.append(dict(label=f"{group}\n{count:,} simulation{'s' * (count > 1)}",
+                           height=1 + 2 * np.log10(count), arrays=[values[inside]],
+                           lines=[lines if len(lines) <= 12 else []]))
+    return heatmap_figure(title, panels, x_edges, limit, colorbar_label, **options)
+
+
+def curve_heatmap(table, curves, experiment, observable, pair, title):
+    """One curve of every simulation, all model groups, rows in the order of `table`; top strip = experiment."""
     rows, lag_frames, lags = curves.rows(observable, pair)
-    values = curves.values[table["curve_row"].to_numpy()[:, None], rows[None, :], 0]      # mean curve of every simulation
     target, _ = experiment_curve(experiment, observable, pair, lag_frames)
     limit = 2 * np.nanmax(np.abs(target))        # colour scale set by the experiment; stronger simulations saturate
-    return heatmap(name, table, values, bin_edges(lags), limit, "correlation (blue negative, red positive)", top_row=target,
-                   x_label="lag (min); positive = MYC after CCAT1" if pair == "EG" else "lag (min)")
+    return overview_heatmap(title, table, mean_curves(curves, table, rows), bin_edges(lags), limit,
+                            "correlation (blue negative, red positive)", top_row=target,
+                            x_label="lag (min); positive = MYC after CCAT1" if pair == "EG" else "lag (min)")
+
+
+def block_labels(models):
+    """Where the model blocks are along the rows, and their names (coarser names if there are too many models)."""
+    names = np.array([model.split("__", 1)[-1] for model in models])
+    for labels in (names, np.array([name.split("__")[0] for name in names])):
+        starts = np.flatnonzero(np.r_[True, labels[1:] != labels[:-1]])
+        if len(starts) <= 45:
+            return (starts + np.r_[starts[1:], len(labels)]) / 2, list(labels[starts])
+    return None
+
+
+def group_heatmap(table, curves, experiment, group, observable, title):
+    """The cross-correlations of one model group on a full page, three times: in model and parameter order,
+    sorted by NRMSE, and sorted by CCC (best on top)."""
+    rows, lag_frames, lags = curves.rows(observable, "EG")
+    target, _ = experiment_curve(experiment, observable, "EG", lag_frames)
+    part = table[table["group"] == group]
+    orders = [("model, then parameters", part),
+              ("sorted by NRMSE, best on top", part.sort_values(f"nrmse_{observable}_EG")),
+              ("sorted by CCC, best on top", part.sort_values(f"ccc_{observable}_EG", ascending=False))]
+    models = part["model_id"].to_numpy()
+    lines = np.flatnonzero(models[1:] != models[:-1]) + 1
+    panels = [dict(label="experiment", height=1, arrays=[target[None, :]] * 3),
+              dict(label="", height=45, arrays=[mean_curves(curves, ordered, rows) for _, ordered in orders],
+                   lines=[lines if len(lines) <= 60 else [], [], []])]
+    return heatmap_figure(title, panels, bin_edges(lags), 2 * np.nanmax(np.abs(target)), "correlation (blue negative, red positive)",
+                          column_titles=[name for name, _ in orders], x_label="lag (min)", row_labels=block_labels(models))
 
 
 def on_fraction_heatmap(table, experiment_on):
@@ -220,9 +311,9 @@ def on_fraction_heatmap(table, experiment_on):
     limit = max(1.0, np.nanpercentile(np.abs(ratio), 99))
     title = (f'ON fraction relative to experiment (experiment: CCAT1 {experiment_on["on_CCAT1"]:.3f}, '
              f'MYC {experiment_on["on_MYC"]:.3f})')
-    return heatmap(title, table, ratio, np.array([0.0, 1.0, 2.0]), limit,
-                   "log2(simulated / experimental); 0 = equal, +1 = twice as often ON",
-                   x_ticks=([0.5, 1.5], ["CCAT1 (E)", "MYC (G)"]))
+    return overview_heatmap(title, table, ratio, np.array([0.0, 1.0, 2.0]), limit,
+                            "log2(simulated / experimental); 0 = equal, +1 = twice as often ON",
+                            x_ticks=([0.5, 1.5], ["CCAT1 (E)", "MYC (G)"]))
 
 
 def top_curves(table, curves, experiment, experiment_on):
@@ -264,48 +355,70 @@ def top_curves(table, curves, experiment, experiment_on):
     return figure
 
 
-def score_by_group(table):
-    """Every simulation's score, one row of points per model group; the bar marks the group median."""
+def metric_by_group(table, column, title, scale, reference=None):
+    """One metric per model group: a violin, every simulation as a faint point, and the group median
+    (black bar, value at the right). reference: the experiment's value, drawn as a dashed line."""
     groups = list(dict.fromkeys(table["group"]))
-    figure, axis = plt.subplots(figsize=(7.5, 0.5 * len(groups) + 1.3))
+    forward = np.log10 if scale == "log" else (lambda values: values)
+    figure, axis = plt.subplots(figsize=(8, 0.62 * len(groups) + 1.3))
     jitter = np.random.default_rng(0)
+    sideways = dict(orientation="horizontal") if "orientation" in inspect.signature(axis.violinplot).parameters else dict(vert=False)
     for y, group in enumerate(groups):
-        scores = table.loc[table["group"] == group, "score"].dropna()
-        axis.scatter(scores, y + jitter.uniform(-0.25, 0.25, len(scores)), s=7, color=BLUE, alpha=0.35, linewidths=0)
-        axis.plot([scores.median()] * 2, [y - 0.36, y + 0.36], color=INK, linewidth=1.6)
+        values = table.loc[table["group"] == group, column].dropna().to_numpy(dtype=float)
+        values = forward(values[values > 0] if scale == "log" else values)
+        if len(values) == 0:
+            continue
+        if len(values) >= 3 and np.ptp(values) > 0:
+            body = axis.violinplot(values, positions=[y], widths=0.85, showextrema=False, **sideways)["bodies"][0]
+            body.set(facecolor=BLUE, edgecolor=BLUE, alpha=0.3)
+        axis.scatter(values, y + jitter.uniform(-0.3, 0.3, len(values)), s=4, color=BLUE, alpha=0.08, linewidths=0, rasterized=True)
+        median = np.median(values)
+        axis.plot([median] * 2, [y - 0.42, y + 0.42], color=INK, linewidth=1.8)
+        axis.annotate(f"{10 ** median if scale == 'log' else median:.3g}", (1.01, y), xycoords=("axes fraction", "data"),
+                      va="center", fontsize=8)
+    if reference is not None:
+        axis.axvline(reference, color=MUTED, linestyle="--", linewidth=1)
+        axis.annotate("experiment", (reference, -0.62), ha="center", fontsize=7, color=MUTED, annotation_clip=False)
+    if scale == "log":                                  # the axis is in log10 units: label it with 1, 2, 5, 10, ...
+        low, high = axis.get_xlim()
+        ticks = [m * 10.0 ** e for e in range(int(np.floor(low)) - 1, int(np.ceil(high)) + 1) for m in (1, 2, 5)]
+        ticks = [tick for tick in ticks if low <= np.log10(tick) <= high]
+        axis.set_xticks(np.log10(ticks), [f"{tick:g}" for tick in ticks])
     axis.set_yticks(range(len(groups)), groups)
-    axis.invert_yaxis()
-    axis.set_xlabel(f"score: {SCORE_NAME} (lower is better); black bar = group median")
+    axis.set_ylim(len(groups) - 0.4, -0.75)
+    axis.set_xlabel(f"{title}; bar and number = group median", fontsize=8)
     axis.grid(axis="x", color="#e1e0d9", linewidth=0.6)
     axis.set_axisbelow(True)
     for side in ("top", "right", "left"):
         axis.spines[side].set_visible(False)
-    figure.tight_layout()
+    figure.subplots_adjust(left=0.19, right=0.91, top=0.97, bottom=0.14)
     return figure
 
 
-def score_vs_parameters(table):
-    """Score against each swept parameter, one row of panels per model group; the line joins the medians."""
+def metric_vs_parameters(table, column, scale):
+    """One metric against each swept parameter, one row of panels per model group; the line joins the medians."""
     groups = [g for g in dict.fromkeys(table["group"]) if free_parameters(table[table["group"] == g])]
     figure, axes = plt.subplots(len(groups), len(PARAMETERS), figsize=(11, 1.55 * len(groups) + 0.9), sharey=True, squeeze=False)
     for row, group in enumerate(groups):
         rows = table[table["group"] == group]
         free = free_parameters(rows)
-        for column, name in enumerate(PARAMETERS):
-            axis = axes[row, column]
+        for position, name in enumerate(PARAMETERS):
+            axis = axes[row, position]
             if name not in free:
                 axis.set_visible(False)
                 continue
-            axis.scatter(rows[name], rows["score"], s=6, color=BLUE, alpha=0.3, linewidths=0)
+            axis.scatter(rows[name], rows[column], s=5, color=BLUE, alpha=0.12, linewidths=0, rasterized=True)
             if rows[name].nunique() <= 12:
-                median = rows.groupby(name)["score"].median()
+                median = rows.groupby(name)[column].median()
                 axis.plot(median.index, median.to_numpy(), color=INK, linewidth=1.2, marker="o", markersize=3)
             axis.set_xscale("log")
+            if scale == "log":
+                axis.set_yscale("log")
             axis.set_title(f"{group}: {name}", fontsize=8)
             axis.tick_params(labelsize=7, colors=MUTED, labelcolor=INK)
             for side in ("top", "right"):
                 axis.spines[side].set_visible(False)
-        axes[row, 0].set_ylabel("score", fontsize=8)
+        axes[row, 0].set_ylabel(column, fontsize=7)
     figure.tight_layout()
     return figure
 
@@ -323,18 +436,22 @@ def group_summary(table):
     for group in dict.fromkeys(table["group"]):
         part = table[table["group"] == group]
         best = part.loc[part["score"].idxmin()]
-        rows.append([group, len(part), f'{best["score"]:.3f}', f'{part["score"].median():.3f}',
+        rows.append([group, f"{len(part):,}", f'{best["score"]:.3f}', f'{part["score"].median():.3f}',
+                     f'{part["ccc_reporter_EG"].median():.3f}',
+                     f'{int(part["hat_shape_reporter"].sum()):,} ({100 * part["hat_shape_reporter"].mean():.0f}%)',
                      f'simulation {best["sim_id"]}: {best["model_id"]}; {parameter_text(best)}'])
-    return table_html(["Group", "Simulations", "Best score", "Median score", "Best simulation"], rows)
+    return table_html(["Group", "Simulations", "Best score", "Median score", "Median CCC (x-corr, reporter)",
+                       "With Mexican-hat shape (x-corr, reporter)", "Best simulation"], rows)
 
 
-def top_table(table, experiment_on):
+def top_table(table, experiment_on, hat_experiment):
     rows = [[sim["rank"], sim["sim_id"], sim["model_id"], parameter_text(sim), f'{sim["score"]:.3f}',
              f'{sim["nrmse_binary_EG"]:.3f} / {sim["ccc_binary_EG"]:.3f}', f'{sim["nrmse_reporter_EG"]:.3f} / {sim["ccc_reporter_EG"]:.3f}',
+             f'{sim["hat_reporter"]:.3f} ({"yes" if sim["hat_shape_reporter"] else "no"})',
              f'{sim["on_E"]:.3f}', f'{sim["on_G"]:.3f}'] for _, sim in table.sort_values("rank").head(TOP_N).iterrows()]
     return table_html(["Rank", "Simulation", "Model", "Parameters", "Score", "x-corr state NRMSE / CCC",
-                       "x-corr reporter NRMSE / CCC", f'ON CCAT1 (exp. {experiment_on["on_CCAT1"]:.3f})',
-                       f'ON MYC (exp. {experiment_on["on_MYC"]:.3f})'], rows)
+                       "x-corr reporter NRMSE / CCC", f'Hat depth, reporter (exp. {hat_experiment["reporter"]["hat"]:.3f}); shape?',
+                       f'ON CCAT1 (exp. {experiment_on["on_CCAT1"]:.3f})', f'ON MYC (exp. {experiment_on["on_MYC"]:.3f})'], rows)
 
 
 def json_ready(array):
@@ -477,7 +594,7 @@ function rateTable(sims, vary) {                // the regulated rates of the dr
     rows += `<tr><td>${r.gene === "E" ? "CCAT1" : "MYC"} ${r.rate}</td><td>${r.by}</td><td>${f(fitted)}</td>` + sims.map(s => {
       const base = s.base[r.index], fold = s.par.fold, activity = (fitted / base - 1) / (fold - 1);
       const when = r.by.endsWith(" R") ? ` per occupied reporter position (mean ${activity.toFixed(2)} occupied)` : ` (${(100 * activity).toFixed(0)}% of the time)`;
-      return `<td>${f(base)} → ${f(base * fold)}` + (fold > 1 ? when : "") + "</td>";
+      return `<td>${f(base)} → ${f(base * fold)}` + (fold !== 1 ? when : "") + "</td>";
     }).join("") + "</tr>";
   }
   $("rates").innerHTML = `<table>${rows}</table><p class="sub">Rates per minute. Base = the rate while its source is inactive; regulated = base × fold. For source state R every occupied reporter position of the source gene adds (fold − 1) × base.
@@ -492,13 +609,17 @@ $("curve").value = 1; $("group").value = groups[Math.min(1, groups.length - 1)];
 """
 
 
-def write_report(run_dir, config, done, table, curves, experiment, experiment_on, fitted, plots):
+def write_report(run_dir, config, done, table, curves, experiment, experiment_on, fitted, hat_experiment, plots):
     matching = config["simulation"].get("rate_matching", "time_average")
     data = json.dumps(write_explorer(run_dir, table, curves, experiment, fitted, matching), separators=(",", ":")).replace("</", "<\\/")
-    figures = "".join(
-        f'<section class="card"><figure><h3>{html.escape(title)}</h3><p class="sub">{html.escape(caption)} '
-        f'<a href="plots/{stem}.pdf">PDF</a> · <a href="plots/{stem}.png">PNG</a></p>'
-        f'<img src="plots/{stem}.png" alt="{html.escape(title)}" loading="lazy"></figure></section>' for stem, title, caption in plots)
+    figures = ""
+    for section in dict.fromkeys(plot[0] for plot in plots):                    # one heading per group of plots
+        figures += f"<h2>{html.escape(section)}</h2>" + "".join(
+            f'<section class="card"><figure><h3>{html.escape(title)}</h3><p class="sub">{html.escape(caption)} '
+            f'<a href="plots/{stem}.pdf">PDF</a> · <a href="plots/{stem}.png">PNG</a></p>'
+            f'<img src="plots/{stem}.png" alt="{html.escape(title)}" loading="lazy"></figure></section>'
+            for part, stem, title, caption in plots if part == section)
+    hat = hat_experiment["reporter"]
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Coupled-model sweep results</title><style>{STYLE}</style></head>
 <body><main><h1>Coupled-model sweep: results</h1>
@@ -516,9 +637,12 @@ fewer simulations are shown). The individual replicates are in the results files
 parameter sets (extensive sweep), all of them are drawn and the other parameters are not held fixed.</p></section>
 
 <h2>Summary by model group</h2><section class="card">{group_summary(table)}</section>
-<h2>The {TOP_N} best simulations</h2><section class="card">{top_table(table, experiment_on)}
+<p class="sub">Mexican-hat shape: mean cross-correlation positive within ±{HAT_CENTER_MIN} min and negative in both flanks
+({HAT_FLANKS_MIN[0]} to {HAT_FLANKS_MIN[1]} min on each side). Depth = centre minus the mean of the flanks. Experiment (reporter count):
+centre {hat["center"]:.3f}, left {hat["left"]:.3f}, right {hat["right"]:.3f}, depth {hat["hat"]:.3f}.</p>
+<h2>The {TOP_N} best simulations</h2><section class="card">{top_table(table, experiment_on, hat_experiment)}
 <p class="sub">All simulations: <a href="ranked_scores.csv">ranked_scores.csv</a></p></section>
-<h2>Plots</h2>{figures}
+{figures}
 <script>const DATA={data};</script><script>{EXPLORER_JS}</script></main></body></html>"""
     (run_dir / "results_report.html").write_text(page)
 
@@ -527,30 +651,56 @@ parameter sets (extensive sweep), all of them are drawn and the other parameters
 def main():
     if len(sys.argv) != 2:
         raise SystemExit(__doc__)
-    config, run_dir, table, curves, experiment, experiment_on, done, fitted = load(Path(sys.argv[1]).resolve())
+    config, run_dir, table, curves, experiment, experiment_on, done, fitted, hat_experiment = load(Path(sys.argv[1]).resolve())
     table.drop(columns="curve_row").sort_values("rank").to_csv(run_dir / "ranked_scores.csv", index=False)
     folder = run_dir / "plots"
     folder.mkdir(exist_ok=True)
-    plots = []      # (file name, title, caption) of every plot, in report order
+    for old in [*folder.glob("*.pdf"), *folder.glob("*.png")]:
+        old.unlink()
+    plots = []      # (report section, file name, title, caption) of every plot, in report order
 
-    def save(figure, stem, title, caption):
+    def save(section, figure, name, title, caption):
+        stem = f"{len(plots) + 1:02d}_{name}"
         figure.savefig(folder / f"{stem}.pdf", dpi=300)
         figure.savefig(folder / f"{stem}.png", dpi=PNG_DPI)
         plt.close(figure)
-        plots.append((stem, title, caption))
+        plots.append((section, stem, title, caption))
 
-    save(top_curves(table, curves, experiment, experiment_on), "01_top_simulations", f"The {TOP_N} best simulations",
-         "Every curve of each top simulation (blue) against experiment (black) and the uncoupled control (grey, dashed).")
-    save(score_by_group(table), "02_score_by_group", "Score by model group", "One point per simulation.")
-    save(score_vs_parameters(table), "03_score_vs_parameters", "Score against each swept parameter",
-         "One point per simulation; the black line joins the medians.")
-    for number, (observable, pair, name) in enumerate(CURVES, start=4):
-        save(curve_heatmap(table, curves, experiment, observable, pair, name), f"{number:02d}_heatmap_{pair}_{observable}", name,
-             "Each row is one simulation (the mean of its replicate datasets), grouped by model group, then model, "
-             "then parameters. Top strip: experiment.")
-    save(on_fraction_heatmap(table, experiment_on), "10_heatmap_on_fraction", "ON fraction relative to experiment",
-         "Rows as in the curve heatmaps.")
-    write_report(run_dir, config, done, table, curves, experiment, experiment_on, fitted, plots)
+    save("Best simulations", top_curves(table, curves, experiment, experiment_on), "top_simulations", f"The {TOP_N} best simulations",
+         "Every curve of each top simulation (blue, mean ± SE) against experiment (black) and the uncoupled control (grey, dashed).")
+
+    for column, title, scale in METRICS:
+        reference = hat_experiment[column.split("_")[1]]["hat"] if column.startswith("hat") else None
+        save("Metrics by model group", metric_by_group(table, column, title, scale, reference), f"by_group_{column}", title,
+             "Violin and one faint point per simulation; the bar and the number at the right are the group median.")
+    for column, title, scale in METRICS:
+        save("Metrics against each swept parameter", metric_vs_parameters(table, column, scale), f"vs_parameters_{column}", title,
+             "One point per simulation; the black line joins the medians.")
+
+    rows_text = "Each row is one simulation (the mean of its replicates). Top strip: experiment. Panel heights grow with the number of simulations, not to scale."
+    for observable, pair, name in CURVES:
+        save("Heatmaps of all model groups, in model and parameter order", curve_heatmap(table, curves, experiment, observable, pair, name),
+             f"heatmap_{pair}_{observable}", name, rows_text)
+    save("Heatmaps of all model groups, in model and parameter order", on_fraction_heatmap(table, experiment_on),
+         "heatmap_on_fraction", "ON fraction relative to experiment", "Rows as in the curve heatmaps.")
+
+    for observable, name in [("reporter", "reporter count"), ("binary", "ON/OFF state")]:
+        for metric, ascending in [("nrmse", True), ("ccc", False)]:
+            ordered = sorted_within_groups(table, f"{metric}_{observable}_EG", ascending)
+            title = f"CCAT1 x MYC cross-correlation, {name}: sorted by {metric.upper()} within each group"
+            save("Cross-correlation heatmaps, sorted within each model group", curve_heatmap(ordered, curves, experiment, observable, "EG", title),
+                 f"heatmap_EG_{observable}_by_{metric}", title, "Best simulations on top of each group. " + rows_text)
+
+    for group in dict.fromkeys(table["group"]):
+        if (table["group"] == group).sum() < 2:
+            continue
+        for observable, name in [("reporter", "reporter count"), ("binary", "ON/OFF state")]:
+            title = f"{group}: CCAT1 x MYC cross-correlation, {name}"
+            save("Cross-correlation heatmaps, one model group per page", group_heatmap(table, curves, experiment, group, observable, title),
+                 f"group_{group}_{observable}", title,
+                 "Left: in model and parameter order, with the model names. Middle and right: the same simulations sorted by NRMSE and by CCC.")
+
+    write_report(run_dir, config, done, table, curves, experiment, experiment_on, fitted, hat_experiment, plots)
     print(f"Wrote {run_dir / 'results_report.html'} (needs plots/ and explorer/ next to it) and {run_dir / 'ranked_scores.csv'}")
 
 

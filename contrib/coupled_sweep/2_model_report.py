@@ -209,7 +209,7 @@ def main():
 
     overview, cards = [], []
     for group, rows in groups.items():
-        swept = [m for m in rows if int(m["n_simulations"]) > 1 or group == "uncoupled"]      # without the gamma = 0 control
+        swept = [m for m in rows if m["control"] != "yes" or group == "uncoupled"]            # without the gamma = 0 control
         example = swept[0]
         n_sims = sum(int(m["n_simulations"]) for m in rows)
         names = ", ".join(k for k in PARAMETERS if example[k] and not example[k].startswith("=")) if group != "uncoupled" else "none"

@@ -233,6 +233,14 @@ function build_model(row, fitted, matching)
     connect("HG_rates", 3, nh == 2 ? 2 : 3, 2)        # H3: hidden state 1 regulates E, state 3 regulates G
     hidden_rates = Float64[parse(Float64, row[name]) for name in ("h12", "h21", "h23", "h32")[1:2*(nh-1)]]
     model = Model(row["model_id"], nh, hidden_rates, edges, parse(Float64, row["fold"]) - 1, copy(fitted))
+    # Every coupled rate must stay positive (StochasticGene requires the same). A fold below 1 is fine from a
+    # promoter or hidden state. From source state R every occupied reporter position adds fold - 1, so a fold
+    # below 2/3 would make the rate negative with all three positions occupied.
+    for (u, k) in unique([(edge.target, edge.rate) for edge in edges]), s in 1:64*npromoter(model)
+        factor(model, sstate(model, s)..., u, k) > 0 || error(
+            "$(model.id), fold $(row["fold"]): the multiplier of $(RATE_NAMES[k]) would be zero or negative in some state. " *
+            "With source state R, folds below 2/3 are not possible.")
+    end
     model.base .= base_rates(model, fitted, matching)
     model
 end

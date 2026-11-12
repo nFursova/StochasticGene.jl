@@ -75,10 +75,20 @@ def log_spaced(values, n):
     return [10 ** (lo + (hi - lo) * i / (n - 1)) for i in range(n)]
 
 
+def inhibits(m, sweep):
+    """Is this model also run with inhibition (fold below 1)? Only if [sweep] gene_inhibition is on, and only for
+    gene-to-gene models that regulate from a promoter state. Hidden units only activate. From source state R every
+    occupied reporter position adds fold - 1, which would make the rate negative for folds below 2/3."""
+    return (sweep.get("gene_inhibition", False) and m["group"] in ("E_to_G", "G_to_E", "reciprocal")
+            and "R" not in (m["EG_state"], m["GE_state"]))
+
+
 def parameter_sets(m, sweep):
     """All parameter sets of one model, as dictionaries with fold and the four hidden rates."""
     spec = HIDDEN_GROUPS.get(m["group"], dict(free=[], tied={}))
     values = {"fold": sweep["coupling_fold"], **{h: sweep["hidden_rate"] for h in spec["free"]}}
+    if inhibits(m, sweep):                              # activation folds and their inverses (rates divided by fold)
+        values["fold"] = sorted([1 / fold for fold in sweep["coupling_fold"]] + list(sweep["coupling_fold"]))
     if m["control"]:                                    # one simulation: fold 1, a middle hidden rate
         middle = sorted(sweep["hidden_rate"])[len(sweep["hidden_rate"]) // 2]
         sets = [{"fold": 1.0, **{h: middle for h in spec["free"]}}]
@@ -88,6 +98,9 @@ def parameter_sets(m, sweep):
         n = sweep["n_extensive"]                        # log-spaced values, each used once, in shuffled order
         rng = random.Random(f'{sweep["seed"]}|{m["model_id"]}')
         columns = {name: rng.sample(log_spaced(v, n), n) for name, v in values.items()}
+        if inhibits(m, sweep):                          # half of the folds activate, half inhibit
+            activation = log_spaced(sweep["coupling_fold"], n - n // 2)
+            columns["fold"] = rng.sample(activation + [1 / fold for fold in activation[:n // 2]], n)
         sets = [{name: column[i] for name, column in columns.items()} for i in range(n)]
     else:
         raise SystemExit('sweep.mode must be "grid" or "extensive"')
@@ -105,7 +118,7 @@ def describe(m, name, sets, sweep):
         return ""
     values = sorted({s[name] for s in sets})
     if len(values) > 12:
-        return f"{len(values)} values {values[0]:g} to {values[-1]:g} (log-spaced)"
+        return f"{len(values)} values {values[0]:g} to {values[-1]:g}"
     return "; ".join(f"{v:g}" for v in values)
 
 
@@ -131,7 +144,7 @@ def main():
                 sim_id=len(simulation_rows) + 1, **{k: m[k] for k in m if k != "control"},
                 **{name: f"{s[name]:.6g}" if name in s else "" for name in ["fold"] + HIDDEN_RATES}))
         model_rows.append(dict(
-            **{k: m[k] for k in m if k != "control"},
+            **{k: m[k] for k in m if k != "control"}, control="yes" if m["control"] else "",
             **{name: describe(m, name, sets, sweep) for name in ["fold"] + HIDDEN_RATES},
             n_simulations=len(sets), first_sim_id=first_id, last_sim_id=len(simulation_rows)))
 

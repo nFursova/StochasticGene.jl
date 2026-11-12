@@ -22,6 +22,9 @@ mode = "grid"                        # "grid":      every combination of the val
 coupling_fold = [3.0, 10.0, 30.0, 100.0]     # regulated rates are multiplied by this while the source is active
 hidden_rate = [0.01, 0.1, 1.0, 10.0]         # hidden-unit switching rates, per minute
 n_extensive = 100
+gene_inhibition = false              # true: gene-to-gene models (E_to_G, G_to_E, reciprocal) are also run with the inverse
+                                     # folds, so the regulated rates are divided by the fold. Not for hidden models (a hidden
+                                     # unit only activates) and not for source state R (the rate could go negative).
 reciprocal_states = "same"           # reciprocal models: "same" = both directions regulate from the same source state
                                      # (1, 2, 3 or R); "all_pairs" = every pair of source states (4 times more models)
 seed = 1                             # random seed of the extensive sampling

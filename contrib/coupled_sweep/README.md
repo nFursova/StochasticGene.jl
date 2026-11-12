@@ -104,6 +104,10 @@ Each swarm job writes one `curves_` and one `metrics_` file, named by its first 
 - Source state R is StochasticGene's `Rsum`: every occupied reporter position of the source gene adds one
   coupling effect, so the rate is multiplied by 1 + (fold − 1) × (number of occupied positions).
 - Controls: every group also has one model with fold 1 (gamma = 0).
+- Inhibition (`[sweep] gene_inhibition = true`): gene-to-gene models are also run with the inverse folds, so the
+  regulated rates are divided by the fold. Hidden models only activate. Source state R is activation only,
+  because every occupied position adds fold − 1 and the rate would go negative for folds below 2/3.
+- Every coupled rate must stay positive; the simulation script stops with an error otherwise.
 - Rate matching (`[simulation] rate_matching`): base rates are rescaled so that each regulated rate still
   averages to its fitted value. `"time_average"` averages over all time, as in the original sweep; coupling
   can then still shift a gene's ON fraction. `"state_average"` averages over the time when the gene is in
@@ -123,6 +127,12 @@ Each swarm job writes one `curves_` and one `metrics_` file, named by its first 
 
 `score()` at the top of `4_plot_results.py` ranks the simulations (lower is better). It is the
 NRMSE of the reporter cross-correlation by default; edit it to use any saved metric.
+
+The report also computes the Mexican-hat shape of each cross-correlation: its mean within ±10 min
+(`center_*`), its mean in the flanks from 20 to 60 min on each side (`left_*`, `right_*`), the depth
+`hat_*` = centre minus the mean of the flanks, and `hat_shape_*` = true when the centre is positive and
+both flanks are negative. The windows are `HAT_CENTER_MIN` and `HAT_FLANKS_MIN` at the top of the script.
+All are columns of `ranked_scores.csv` and can be used in `score()`.
 
 ## Notes
 
