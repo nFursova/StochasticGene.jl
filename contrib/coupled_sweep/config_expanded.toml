@@ -1,0 +1,86 @@
+# Config of the expanded model set: read by 1_generate_models_expanded.py and by steps 2 to 4
+# (add --profile limited or --profile full to their commands; full is the default).
+# Paths are relative to the folder that holds this file (or absolute).
+
+[inputs]
+rates_E = "data/rates_3Prime-5Prime-h2-3301none-enhancer-3Prime.txt"
+rates_G = "data/rates_3Prime-5Prime-h2-3301none-gene-3Prime.txt"
+rate_statistic = "median"
+experimental_curves = "data/experimental.csv"
+experimental_metrics = "data/experimental_metrics.csv"
+trace_lengths = ""
+
+[output]
+run_root = "runs/expanded_combinations" # /limited or /full is appended; existing destinations are refused
+
+[design]
+groups = ["E_to_G", "G_to_E", "reciprocal", "H2", "H3_symmetric", "H3_asymmetric"]
+rate_subset_sizes = [1, 2, 3, 4]       # from R12, R21, R23, R32, Initiate: 30 subsets
+promoter_subset_sizes = [1, 2, 3]     # from states 1, 2, 3: 7 subsets, interpreted as OR
+include_reporter_source = true       # Rsum is the eighth source: each occupied reporter adds (fold - 1)
+hidden_sources = "fixed"             # H2: 2→E,G; H3: 1→E and 3→G
+# "all_nonempty" also varies all nonempty hidden-state subsets for each target.
+# This optional extension is NOT included in the default 60,780-architecture count.
+
+[sampling]
+seed = 1234
+coupling_fold = [0.003, 300.0]         # fold range of E -> G and G -> E: below 1 inhibits, above 1 activates
+hidden_rate = [0.01, 100.0]          # retain current config_v3 hidden-rate endpoints, /min
+control_hidden_rate = 1.0
+# Every free axis is independently shuffled across parameter_sets log-spaced levels.
+# One fold is shared by all selected target rates/states of ONE connection.
+# Different connections have independent fold axes: EG, GE, HE, HG.
+# All-state sources are included as requested, even though rate matching cancels their fold.
+
+[sampling.ranges]
+# Per-axis ranges that replace coupling_fold / hidden_rate for that axis.
+fold_HE = [1.0, 300.0]               # hidden unit -> E: activation only
+fold_HG = [1.0, 300.0]               # hidden unit -> G: activation only
+# fold_EG = [0.01, 100.0]
+# fold_GE = [0.01, 100.0]
+# h12 = [0.001, 1000.0]              # H3: E-active state 1 -> inactive state 2
+# h21 = [0.001, 1000.0]              # H3: inactive state 2 -> E-active state 1
+# h23 = [0.001, 1000.0]              # H3: inactive state 2 -> G-active state 3
+# h32 = [0.001, 1000.0]              # H3: G-active state 3 -> inactive state 2
+# For symmetric H3, h23=h21 and h32=h12; overrides for tied axes are not used.
+# Inhibition from R (Rsum) can make 1 + (fold - 1) x reporters negative; 3_run_simulations.jl then holds the
+# multiplier at 1e-6, in the rate matching and in both simulators.
+
+[profiles.limited]
+parameter_sets = 1
+replicates = 1
+
+[profiles.limited.values]
+fold_EG = 2.0
+fold_GE = 3.0
+fold_HE = 2.0
+fold_HG = 10.0
+h12 = 0.1
+h21 = 0.01
+h23 = 0.2
+h32 = 0.02
+# Group-specific inactive axes are ignored; symmetric H3 ties override h23/h32.
+# Controls use fold 1 and control_hidden_rate regardless of these values.
+
+[profiles.full]
+parameter_sets = 100
+replicates = 10                     
+
+[simulation]
+simulator = "fast"                  
+ntraces = 137
+nframes = 216
+interval_min = 1.6666666666666667
+epsilon = 0.001                      # experimental preprocessing must use the same epsilon
+score_max_lag_min = 90.0
+rate_matching = "state_average"
+seed = 20261106
+
+[swarm]
+simulations_per_job = 960            
+threads = 12
+memory_gb = 50
+walltime = "04:00:00"
+julia = "julia"
+julia_project = "/data/fursovan2/sg201"
+modules = "julialang"

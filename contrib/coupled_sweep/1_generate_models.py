@@ -91,8 +91,8 @@ def swept_parameters(m, sweep):
       sweep samples the two independently.
     """
     grid = sweep["mode"] == "grid"
-    extensive = sweep.get("extensive", {})
     gene_folds = sorted([1 / fold for fold in sweep["coupling_fold"]] + list(sweep["coupling_fold"]))
+    extensive = extensive_ranges(sweep)
     values = lambda name, grid_values: grid_values if grid else extensive[name]
     free, tied = {}, {}
     if m["group"] == "E_to_G":
@@ -111,10 +111,22 @@ def swept_parameters(m, sweep):
         if grid:
             tied["fold_HG"] = "fold_HE"
         else:
-            free["fold_HG"] = extensive["fold_HG"]
+            free["fold_HG"] = values("fold_HG", None)
         free.update({rate: values(rate, sweep["hidden_rate"]) for rate in spec["rates"]})
         tied.update(spec["tied"])
     return free, tied
+
+
+def extensive_ranges(sweep):
+    """[min, max] of every parameter in the extensive sweep: [sweep.extensive] where given, otherwise taken from
+    the grid lists (gene-to-gene folds 1/largest to largest fold, hidden folds smallest to largest fold,
+    hidden rates smallest to largest rate)."""
+    folds, rates = sweep["coupling_fold"], sweep["hidden_rate"]
+    ranges = dict(fold_EG=[1 / max(folds), max(folds)], fold_GE=[1 / max(folds), max(folds)],
+                  fold_HE=[min(folds), max(folds)], fold_HG=[min(folds), max(folds)],
+                  **{rate: [min(rates), max(rates)] for rate in ("h12", "h21", "h23", "h32")})
+    ranges.update(sweep.get("extensive", {}))
+    return ranges
 
 
 def parameter_sets(m, sweep):
@@ -155,10 +167,7 @@ def check(sweep):
     if min(sweep["coupling_fold"]) <= 1:
         raise SystemExit("sweep.coupling_fold lists activation folds, all above 1; their inverses are added for gene-to-gene models")
     if sweep["mode"] == "extensive":
-        ranges = sweep.get("extensive", {})
-        missing = [name for name in PARAMETERS if name not in ranges]
-        if missing:
-            raise SystemExit(f"[sweep.extensive] needs a [min, max] for: {', '.join(missing)} (see config.toml)")
+        ranges = extensive_ranges(sweep)
         if min(ranges["fold_HE"][0], ranges["fold_HG"][0]) < 1:
             raise SystemExit("[sweep.extensive] fold_HE and fold_HG must start at 1 or above: hidden models only activate")
 

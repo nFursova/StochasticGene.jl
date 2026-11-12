@@ -2,8 +2,10 @@
 """Step 4. Report the simulation results against the experimental data and rank the simulations.
 
     python3 4_plot_results.py config.toml
+    python3 4_plot_results.py config_expanded.toml --profile full      (expanded runs; full is the default)
 
-Reads <run_dir>/simulations.csv and <run_dir>/results/, and writes into <run_dir>:
+Reads the simulation list (simulations.csv, or expanded_models.csv and expanded_simulations.csv) and
+<run_dir>/results/, and writes into <run_dir>:
     results_report.html   the report: an interactive explorer (choose a model, vary one parameter, see the
                           curves change), summary tables, and every plot below
     plots/                every plot as a PDF and as a 600 dpi PNG
@@ -30,6 +32,7 @@ HAT_CENTER_MIN = 10         # Mexican-hat shape: the cross-correlation should be
 HAT_FLANKS_MIN = (20, 60)   # and negative between these lags (minutes) on both sides
 
 SCORE_NAME = "NRMSE of the reporter-count cross-correlation"
+MAX_POINTS = 50_000         # scatter plots draw at most this many randomly chosen points per row (medians use all)
 
 
 def score(metrics):
@@ -80,13 +83,26 @@ class Curves:
     A simulation that is in more than one file (a test run and the swarm, say) is taken from the newest file."""
 
     def __init__(self, files):
+        cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+        if files[0].suffix == ".f32":                   # expanded runs: mean and SE, rows listed in curve_layout.csv
+            layout = pd.read_csv(files[0].parent / "curve_layout.csv")
+            keep = (layout["lag_min"].abs() <= PLOT_MAX_LAG_MIN).to_numpy()    # only the plotted lags are kept in memory
+            self.layout = layout[keep].reset_index(drop=True)
+            self.columns = ["mean", "se"]
+            with ProcessPoolExecutor(max_workers=cores) as pool:
+                parts = list(pool.map(read_binary_curve_file, files, [keep] * len(files)))
+            self.store(parts)
+            return
         first = pd.read_csv(files[0])
         block = int((first["sim_id"] == first["sim_id"].iloc[0]).sum())           # rows per simulation
         self.layout = first.iloc[:block][["observable", "pair", "lag_frames", "lag_min"]].reset_index(drop=True)
         self.columns = [c for c in first.columns if c in ("mean", "se") or c.startswith("rep")]
-        cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
         with ProcessPoolExecutor(max_workers=cores) as pool:                       # read the files in parallel
             parts = list(pool.map(read_curve_file, files, [block] * len(files), [self.columns] * len(files)))
+        self.store(parts)
+
+    def store(self, parts):
+        """Keep the curves of every simulation, from (sim_ids, array) of each file."""
         ids = np.concatenate([part[0] for part in parts])
         keep = ~pd.Index(ids).duplicated(keep="last")                              # files are ordered oldest to newest
         self.values = np.concatenate([part[1] for part in parts])[keep]
@@ -100,24 +116,64 @@ class Curves:
         return part.index.to_numpy(), part["lag_frames"].to_numpy(), part["lag_min"].to_numpy()
 
 
+def read_binary_curve_file(path, keep):
+    """The sim_ids of one .f32 curves file (from its name, curves_FIRST-LAST.f32) and its mean and SE of the kept rows."""
+    first, last = (int(part) for part in path.stem.split("_")[1].split("-"))
+    values = np.fromfile(path, dtype=np.float32).reshape(last - first + 1, len(keep), 2)
+    return np.arange(first, last + 1), np.ascontiguousarray(values[:, keep, :])
+
+
 def read_curve_file(path, block, columns):
     """The sim_ids of one curves file and its numbers as an array [simulation, row, column]."""
     frame = pd.read_csv(path, usecols=["sim_id"] + columns)
     return frame["sim_id"].to_numpy()[::block], frame[columns].to_numpy(dtype=np.float32).reshape(-1, block, len(columns))
 
 
-def load(config_path):
+def run_folder(config, folder, profile):
+    """The run folder, whether the run is expanded, and how many replicates each simulation has."""
+    if "profiles" in config:                            # config_expanded.toml of 1_generate_models_expanded.py
+        if profile not in config["profiles"]:
+            raise SystemExit(f"no profile {profile}; available: {', '.join(config['profiles'])}")
+        return folder / config["output"]["run_root"] / profile, True, config["profiles"][profile]["replicates"]
+    return folder / config["output"]["run_dir"], False, config["simulation"]["replicates"]
+
+
+def read_simulations(run_dir, expanded):
+    """The simulation list, with the columns of a regular simulations.csv plus HE_state and HG_state.
+    A state is one state ("3"), several states that each regulate ("1+2"), or "R" (Rsum)."""
+    if expanded:
+        models = pd.read_csv(run_dir / "expanded_models.csv", dtype=str)
+        points = pd.read_csv(run_dir / "expanded_simulations.csv", usecols=["sim_id", "architecture_id"] + PARAMETERS)
+        table = pd.DataFrame(dict(model_id=models["architecture_id"], group=models["group"],
+                                  hidden=models["group"].map({"H2": "H2", "H3_symmetric": "H3", "H3_asymmetric": "H3"}).fillna("none")))
+        for edge in ("EG", "GE", "HE", "HG"):
+            table[f"{edge}_state"] = models[f"{edge}_states"].mask(models[f"{edge}_source_kind"] == "reporter_count", "R")
+            table[f"{edge}_rates"] = models[f"{edge}_rates"]
+        return points.rename(columns={"architecture_id": "model_id"}).merge(table, on="model_id")
+    table = pd.read_csv(run_dir / "simulations.csv", dtype={"EG_state": str, "GE_state": str}, low_memory=False)
+    if "fold" in table:                                 # results made before the folds were split per connection
+        for edge in ("EG", "GE", "HE", "HG"):
+            table[f"fold_{edge}"] = table["fold"].where(table[f"{edge}_rates"].notna())
+    for name in PARAMETERS:
+        table[name] = table.get(name, np.nan)
+    default = {"H2": ("2", "2"), "H3": ("1", "3")}      # hidden states that regulate E and G
+    for i, edge in enumerate(("HE", "HG")):
+        table[f"{edge}_state"] = table["hidden"].map({h: states[i] for h, states in default.items()}).where(table[f"{edge}_rates"].notna())
+    return table
+
+
+def load(config_path, profile):
     config = tomllib.loads(config_path.read_text())
     folder = config_path.parent
-    run_dir = folder / config["output"]["run_dir"]
-    simulations = pd.read_csv(run_dir / "simulations.csv", dtype={"EG_state": str, "GE_state": str}, low_memory=False)
+    run_dir, expanded, replicates = run_folder(config, folder, profile)
+    simulations = read_simulations(run_dir, expanded)
     oldest_first = lambda pattern: sorted((run_dir / "results").glob(pattern), key=lambda f: f.stat().st_mtime)
     metrics = pd.concat([pd.read_csv(f) for f in oldest_first("metrics_*.csv")])
     repeated = int(metrics["sim_id"].duplicated().sum())
     if repeated:
         print(f"{repeated:,} simulations are in more than one results file; the newest file is used for each")
     metrics = metrics.drop_duplicates("sim_id", keep="last")
-    curves = Curves(oldest_first("curves_*.csv"))
+    curves = Curves(oldest_first("curves_*.f32") or oldest_first("curves_*.csv"))
     experiment = pd.read_csv(folder / config["inputs"]["experimental_curves"])
     experiment_on = pd.read_csv(folder / config["inputs"]["experimental_metrics"]).set_index("metric")["mean"]
     # One row per simulation: parameters, metrics, score, rank (1 = best) and where its curves are in `curves`.
@@ -129,6 +185,8 @@ def load(config_path):
     table = display_order(table)
     done = f'{len(table):,} of {len(simulations):,} simulations have results'
     print(done)
+    sweep = f"expanded, profile {profile}" if expanded else f'sweep mode: {config["sweep"]["mode"]}'
+    done += f' · {replicates} replicate datasets each · simulator: {config["simulation"]["simulator"]} · {sweep}' 
     statistic = config["inputs"]["rate_statistic"]
     fitted = read_rates(folder / config["inputs"]["rates_E"], statistic) + read_rates(folder / config["inputs"]["rates_G"], statistic)
     return config, run_dir, table, curves, experiment, experiment_on, done, fitted, hat_experiment
@@ -147,10 +205,9 @@ def read_rates(path, statistic):
 
 def regulated_rates(sim):
     """Which rates a model regulates, and which unit and state regulates each."""
-    hidden_states = ("H state 2", "H state 2") if sim["hidden"] == "H2" else ("H state 1", "H state 3")
     regulated = []
-    for column, gene, source, fold in [("GE_rates", "E", f'G state {sim["GE_state"]}', "fold_GE"), ("HE_rates", "E", hidden_states[0], "fold_HE"),
-                                       ("EG_rates", "G", f'E state {sim["EG_state"]}', "fold_EG"), ("HG_rates", "G", hidden_states[1], "fold_HG")]:
+    for column, gene, source, fold in [("GE_rates", "E", f'G state {sim["GE_state"]}', "fold_GE"), ("HE_rates", "E", f'H state {sim["HE_state"]}', "fold_HE"),
+                                       ("EG_rates", "G", f'E state {sim["EG_state"]}', "fold_EG"), ("HG_rates", "G", f'H state {sim["HG_state"]}', "fold_HG")]:
         if pd.notna(sim[column]):
             regulated += [dict(gene=gene, rate=rate, by=source, fold=fold, index=BASE_COLUMNS.index(f"base_{gene}_{rate}"))
                           for rate in sim[column].split("+")]
@@ -207,7 +264,13 @@ def display_order(table):
     group = table["group"]
     e, g = "E" + text("EG_state"), "G" + text("GE_state")
     e_rates, g_rates = e + "_" + text("EG_rates"), g + "_" + text("GE_rates")
-    hidden = group.map({"H2": "H2", "H3_symmetric": "H3s", "H3_asymmetric": "H3a"}).fillna("") + " " + text("HE_rates")
+    # Hidden models: "H2 R12" when both genes have the same regulated rates and the usual hidden states, otherwise
+    # "H2 E2:R12 G2:R21" (states and rates of each gene).
+    usual = ((table["hidden"] == "H2") & (text("HE_state") == "2") & (text("HG_state") == "2")) | \
+            ((table["hidden"] == "H3") & (text("HE_state") == "1") & (text("HG_state") == "3"))
+    same = usual & (text("HE_rates") == text("HG_rates"))
+    hidden = group.map({"H2": "H2", "H3_symmetric": "H3s", "H3_asymmetric": "H3a"}).fillna("") + " " + np.where(
+        same, text("HE_rates"), "E" + text("HE_state") + ":" + text("HE_rates") + " G" + text("HG_state") + ":" + text("HG_rates"))
     hidden_first = "h12 " + number("h12") + " h21 " + number("h21")
     kinds = [group == "E_to_G", group == "G_to_E", group == "reciprocal", table["hidden"] != "none"]
     table = table.assign(
@@ -218,10 +281,11 @@ def display_order(table):
                                 default=table["block2"])
     control = table["model_id"].str.endswith("gamma0").to_numpy()
     table.loc[control, BLOCKS] = "control"
-    first_seen = lambda column: pd.Categorical(table[column], categories=table[column].dropna().unique()).codes
-    state = lambda column: table[column].map({"1": 0, "2": 1, "3": 2, "R": 3}).fillna(-1)
-    keys = [first_seen("group"), ~control, state("EG_state"), state("GE_state"), first_seen("EG_rates"), first_seen("GE_rates"),
-            first_seen("HE_rates")] + [table[name].fillna(-1) for name in PARAMETERS[4:] + PARAMETERS[:4]]
+    # States and rates in the order the generator lists them (the controls are left out, as they come first anyway).
+    first_seen = lambda column: pd.Categorical(table[column], categories=table.loc[~control, column].dropna().unique()).codes
+    keys = [first_seen("group"), ~control] + [first_seen(column) for column in
+            ("EG_state", "GE_state", "EG_rates", "GE_rates", "HE_state", "HG_state", "HE_rates", "HG_rates")] + \
+           [table[name].fillna(-1) for name in PARAMETERS[4:] + PARAMETERS[:4]]
     return table.iloc[np.lexsort(keys[::-1])].reset_index(drop=True)
 
 
@@ -432,7 +496,8 @@ def metric_by_group(table, column, title, scale, reference=None):
         if len(values) >= 3 and np.ptp(values) > 0:
             body = axis.violinplot(values, positions=[y], widths=0.85, showextrema=False, **sideways)["bodies"][0]
             body.set(facecolor=BLUE, edgecolor=BLUE, alpha=0.3)
-        axis.scatter(values, y + jitter.uniform(-0.3, 0.3, len(values)), s=4, color=BLUE, alpha=0.08, linewidths=0, rasterized=True)
+        shown = values if len(values) <= MAX_POINTS else jitter.choice(values, MAX_POINTS, replace=False)
+        axis.scatter(shown, y + jitter.uniform(-0.3, 0.3, len(shown)), s=4, color=BLUE, alpha=0.08, linewidths=0, rasterized=True)
         median = np.median(values)
         axis.plot([median] * 2, [y - 0.42, y + 0.42], color=INK, linewidth=1.8)
         axis.annotate(f"{10 ** median if scale == 'log' else median:.3g}", (1.01, y), xycoords=("axes fraction", "data"),
@@ -457,8 +522,11 @@ def metric_by_group(table, column, title, scale, reference=None):
 
 
 def metric_vs_parameters(table, column, scale):
-    """One metric against each swept parameter, one row of panels per model group; the line joins the medians."""
+    """One metric against each swept parameter, one row of panels per model group; the line joins the medians.
+    None if no group sweeps a parameter (one parameter set per model)."""
     groups = [g for g in dict.fromkeys(table["group"]) if free_parameters(table[table["group"] == g])]
+    if not groups:
+        return None
     shown = [name for name in PARAMETERS if any(name in free_parameters(table[table["group"] == g]) for g in groups)]
     figure, axes = plt.subplots(len(groups), len(shown), figsize=(2.2 * len(shown) + 0.8, 1.55 * len(groups) + 0.9),
                                 sharey=True, squeeze=False)
@@ -470,7 +538,8 @@ def metric_vs_parameters(table, column, scale):
             if name not in free:
                 axis.set_visible(False)
                 continue
-            axis.scatter(rows[name], rows[column], s=5, color=BLUE, alpha=0.12, linewidths=0, rasterized=True)
+            drawn = rows if len(rows) <= MAX_POINTS else rows.sample(MAX_POINTS, random_state=0)
+            axis.scatter(drawn[name], drawn[column], s=5, color=BLUE, alpha=0.12, linewidths=0, rasterized=True)
             if rows[name].nunique() <= 12:
                 median = rows.groupby(name)[column].median()
                 axis.plot(median.index, median.to_numpy(), color=INK, linewidth=1.2, marker="o", markersize=3)
@@ -686,8 +755,7 @@ def write_report(run_dir, config, done, table, curves, experiment, experiment_on
     page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Coupled-model sweep results</title><style>{STYLE}</style></head>
 <body><main><h1>Coupled-model sweep: results</h1>
-<p class="sub">{done} · {config["simulation"]["replicates"]} replicate datasets each · simulator: {config["simulation"]["simulator"]} ·
-sweep mode: {config["sweep"]["mode"]} · rate matching: {config["simulation"].get("rate_matching", "time_average")} · score = {html.escape(SCORE_NAME)} (lower is better) · lags within ±{PLOT_MAX_LAG_MIN} min shown.</p>
+<p class="sub">{done} · rate matching: {config["simulation"].get("rate_matching", "time_average")} · score = {html.escape(SCORE_NAME)} (lower is better) · lags within ±{PLOT_MAX_LAG_MIN} min shown.</p>
 
 <h2>Explore: how a parameter changes the curves</h2>
 <section class="card"><div class="controls">
@@ -712,9 +780,15 @@ centre {hat["center"]:.3f}, left {hat["left"]:.3f}, right {hat["right"]:.3f}, de
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) != 2:
+    arguments = sys.argv[1:]
+    profile = "full"
+    if "--profile" in arguments:
+        at = arguments.index("--profile")
+        profile = arguments[at + 1]
+        del arguments[at:at + 2]
+    if len(arguments) != 1:
         raise SystemExit(__doc__)
-    config, run_dir, table, curves, experiment, experiment_on, done, fitted, hat_experiment = load(Path(sys.argv[1]).resolve())
+    config, run_dir, table, curves, experiment, experiment_on, done, fitted, hat_experiment = load(Path(arguments[0]).resolve(), profile)
     table.drop(columns=["curve_row"] + BLOCKS).sort_values("rank").to_csv(run_dir / "ranked_scores.csv", index=False)
     folder = run_dir / "plots"
     folder.mkdir(exist_ok=True)
@@ -723,6 +797,8 @@ def main():
     plots = []      # (report section, file name, title, caption) of every plot, in report order
 
     def save(section, figure, name, title, caption):
+        if figure is None:
+            return
         stem = f"{len(plots) + 1:02d}_{name}"
         figure.savefig(folder / f"{stem}.pdf", dpi=300)
         figure.savefig(folder / f"{stem}.png", dpi=PNG_DPI)
@@ -735,10 +811,10 @@ def main():
     for column, title, scale in METRICS:
         reference = hat_experiment[column.split("_")[1]]["hat"] if column.startswith("hat") else None
         save("Metrics by model group", metric_by_group(table, column, title, scale, reference), f"by_group_{column}", title,
-             "Violin and one faint point per simulation; the bar and the number at the right are the group median.")
+             "Violin and one faint point per simulation (at most 50,000 drawn per group); the bar and the number at the right are the group median.")
     for column, title, scale in METRICS:
         save("Metrics against each swept parameter", metric_vs_parameters(table, column, scale), f"vs_parameters_{column}", title,
-             "One point per simulation; the black line joins the medians.")
+             "One point per simulation (at most 50,000 drawn per panel); the black line joins the medians.")
 
     rows_text = ("Each row is one simulation (the mean of its replicates). Top strip: experiment. White lines separate model types "
                  "(source state and regulated rates; for hidden models also the hidden rates), named where there is room. "

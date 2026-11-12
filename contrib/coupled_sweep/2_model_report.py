@@ -2,6 +2,7 @@
 """Step 2. Draw what step 1 generated, so you can check it before simulating.
 
     python3 2_model_report.py config.toml
+    python3 2_model_report.py config_expanded.toml --profile full      (expanded runs; full is the default)
 
 Reads <run_dir>/models.csv and writes <run_dir>/models_report.html: for every model group a
 schematic, the rates that are regulated, and the parameter values that are tested.
@@ -199,11 +200,74 @@ MARKERS = ('<svg width="0" height="0" style="position:absolute"><defs>'
            '<path d="M0,0 L8,4 L0,8 z" fill="#2a78d6"/></marker></defs></svg>')
 
 
+def expanded_page(config, run_dir, profile):
+    """Summary page of an expanded run (1_generate_models_expanded.py): too many architectures to draw one by one."""
+    import pandas as pd
+    models = pd.read_csv(run_dir / "expanded_models.csv", dtype=str)
+    points = pd.read_csv(run_dir / "expanded_simulations.csv", usecols=["architecture_id"] + list(PARAMETERS))
+    points = points.merge(models[["architecture_id", "group", "is_control"]], on="architecture_id")
+    replicates = config["profiles"][profile]["replicates"]
+    source = lambda edge: models[f"{edge}_states"].mask(models[f"{edge}_source_kind"] == "reporter_count", "R")
+    overview, cards = [], []
+    for group, rows in models.groupby("group", sort=False):
+        swept = rows[rows["is_control"] != "true"]
+        sims = points[points["group"] == group]
+        overview.append(f'<tr><td>{group}</td><td class="n">{len(swept):,}</td><td class="n">{len(rows) - len(swept)}</td>'
+                        f'<td class="n">{len(sims):,}</td><td class="n">{len(sims) * replicates:,}</td></tr>')
+        if group == "uncoupled":
+            cards.append(f'<section class="card"><header><h2>{group}</h2><p class="sub">{GROUP_TEXT[group]}</p></header>'
+                         f'<div>{schematic(group)}</div></section>')
+            continue
+        lines = []
+        for edge, text in [("EG", "E regulates G"), ("GE", "G regulates E"), ("HE", "H regulates E"), ("HG", "H regulates G")]:
+            used = swept[swept[f"{edge}_rates"].notna()]
+            if len(used):
+                lines.append(f'<p class="what">{text}, from {source(edge)[used.index].nunique()} source options:</p>'
+                             f'<p>{chips(dict.fromkeys(source(edge)[used.index]))}</p>'
+                             f'<p class="what">regulated rates, {used[f"{edge}_rates"].nunique()} subsets:</p>'
+                             f'<p>{chips(dict.fromkeys(used[f"{edge}_rates"]))}</p>')
+        noncontrol = sims[sims["architecture_id"].isin(swept["architecture_id"])]
+        ranges = "".join(f'<tr><th>{PARAMETERS[name]}</th><td>{noncontrol[name].min():g} to {noncontrol[name].max():g} '
+                         f'({noncontrol[name].nunique():,} value{"s" * (noncontrol[name].nunique() > 1)})</td></tr>'
+                         for name in PARAMETERS if noncontrol[name].notna().any())
+        combined = ("Every architecture combines one choice of each connection above: "
+                    f"{len(swept):,} architectures, each with {int(noncontrol.groupby('architecture_id').size().max())} parameter sets.")
+        cards.append(f'<section class="card"><header><h2>{group}</h2><p class="sub">{GROUP_TEXT[group]} '
+                     f'A source with several states (e.g. 1+2) regulates while it is in any of them.</p></header>'
+                     f'<div>{schematic(group)}</div><div class="scroll">{"".join(lines)}<p class="what">{combined}</p>'
+                     f'<table class="params">{ranges}</table>'
+                     f'<p class="what">Plus 1 control with fold 1 (gamma = 0), simulated once.</p></div></section>')
+    page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Expanded coupled-model sweep</title><style>{STYLE}</style></head>
+<body>{MARKERS}<main><h1>Expanded coupled-model sweep: what will be simulated</h1>
+<p class="sub">Profile {html.escape(profile)} · {(models["is_control"] != "true").sum():,} architectures and {(models["is_control"] == "true").sum()} controls · {len(points):,} parameter sets × {replicates} replicate datasets ·
+E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit. "× fold" multiplies the chosen rates while the source is in a regulating state:
+fold above 1 activates, fold below 1 inhibits. From R every occupied reporter position adds (fold − 1).</p>
+<table class="overview"><tr><th>Group</th><th class="n">Architectures</th><th class="n">Controls</th><th class="n">Parameter sets</th>
+<th class="n">Datasets</th></tr>{"".join(overview)}
+<tr><td>Total</td><td class="n">{(models["is_control"] != "true").sum():,}</td><td class="n">{(models["is_control"] == "true").sum()}</td>
+<td class="n">{len(points):,}</td><td class="n">{len(points) * replicates:,}</td></tr></table>
+{"".join(cards)}</main></body></html>"""
+    out = run_dir / "models_report.html"
+    out.write_text(page)
+    print(f"Wrote {out}")
+
+
 def main():
-    if len(sys.argv) != 2:
+    arguments = sys.argv[1:]
+    profile = "full"
+    if "--profile" in arguments:
+        at = arguments.index("--profile")
+        profile = arguments[at + 1]
+        del arguments[at:at + 2]
+    if len(arguments) != 1:
         raise SystemExit(__doc__)
-    config_path = Path(sys.argv[1]).resolve()
+    config_path = Path(arguments[0]).resolve()
     config = tomllib.loads(config_path.read_text())
+    if "profiles" in config:                            # config_expanded.toml of 1_generate_models_expanded.py
+        if profile not in config["profiles"]:
+            raise SystemExit(f"no profile {profile}; available: {', '.join(config['profiles'])}")
+        return expanded_page(config, config_path.parent / config["output"]["run_root"] / profile, profile)
     run_dir = config_path.parent / config["output"]["run_dir"]
     mode, replicates = config["sweep"]["mode"], config["simulation"]["replicates"]
     models = list(csv.DictReader(open(run_dir / "models.csv")))

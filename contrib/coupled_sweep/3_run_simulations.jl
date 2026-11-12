@@ -1,14 +1,22 @@
 #!/usr/bin/env julia
 #=
-Step 3. Simulate the rows of simulations.csv and compare them with the experimental curves.
+Step 3. Simulate a list of simulations and compare them with the experimental curves.
 
     julia 3_run_simulations.jl config.toml --swarm        write <run_dir>/simulations.swarm (simulates nothing)
     julia -t 12 3_run_simulations.jl config.toml 1 12     simulate rows 1 to 12 (this is one swarm line)
     julia -t 12 3_run_simulations.jl config.toml          simulate every row on this machine
 
+Two kinds of run, recognised from the config file:
+    regular    config.toml with [output] run_dir: reads <run_dir>/simulations.csv from 1_generate_models.py
+    expanded   config_expanded.toml with [profiles]: reads expanded_models.csv and expanded_simulations.csv from
+               1_generate_models_expanded.py, in <run_root>/<profile>. Add --profile NAME (default: full), e.g.
+               julia -t 12 3_run_simulations.jl config_expanded.toml --profile limited 1 12
+
 Each run writes two files into <run_dir>/results/:
-    curves_<first>-<last>.csv    the six correlation curves of every simulation: mean and SE over replicates,
-                                 and every replicate (columns rep1, rep2, ...)
+    curves_<first>-<last>.csv    regular runs: the six correlation curves of every simulation, mean and SE over
+                                 replicates, and every replicate (columns rep1, rep2, ...)
+    curves_<first>-<last>.f32    expanded runs, to keep millions of simulations small: mean and SE only, as 32-bit
+                                 numbers [simulation, row, (mean, se)]; the rows are listed in curve_layout.csv
     metrics_<first>-<last>.csv   one row per simulation: ON fractions, mean reporter counts, NRMSE and CCC,
                                  the base rates (rates while no source is active), the ON fractions and
                                  reporter counts of every replicate (columns on_E_rep1, ...), and clipped (1 if a
@@ -46,9 +54,19 @@ function read_rates(path, statistic)
     parse.(Float64, split(lines[row], ',')[1:9])
 end
 
-function read_config(path)
+function read_config(path, profile)
     config = TOML.parsefile(path)
     folder = dirname(abspath(path))
+    expanded = haskey(config, "profiles")                  # config_expanded.toml of 1_generate_models_expanded.py
+    if expanded
+        haskey(config["profiles"], profile) || error("no profile $profile in $path; available: $(join(keys(config["profiles"]), ", "))")
+        run_dir = joinpath(folder, config["output"]["run_root"], profile)
+        isfile(joinpath(run_dir, "COMPLETE.json")) || error("$run_dir has no COMPLETE.json: run 1_generate_models_expanded.py first")
+        replicates = config["profiles"][profile]["replicates"]
+    else
+        run_dir = joinpath(folder, config["output"]["run_dir"])
+        replicates = config["simulation"]["replicates"]
+    end
     input(name) = joinpath(folder, config["inputs"][name])
     sim = config["simulation"]
     statistic = config["inputs"]["rate_statistic"]
@@ -64,24 +82,57 @@ function read_config(path)
         value === nothing || !isfinite(value) ||
             (targets[(row["observable"], row["pair"], parse(Int, row["lag_frames"]))] = value)
     end
-    (; run_dir=joinpath(folder, config["output"]["run_dir"]),
-       fitted,                                   # 2 x 9 fitted rates: row 1 = E, row 2 = G
+    (; run_dir, expanded, profile, fitted,                                   # 2 x 9 fitted rates: row 1 = E, row 2 = G
        lengths, ntraces=length(lengths), nframes=maximum(lengths), targets,
-       simulator=sim["simulator"], replicates=sim["replicates"], interval=sim["interval_min"],
+       simulator=sim["simulator"], replicates, interval=sim["interval_min"],
        rate_matching=get(sim, "rate_matching", "time_average"),
-       warmup_timescales=sim["warmup_timescales"], epsilon=sim["epsilon"],
+       warmup_timescales=get(sim, "warmup_timescales", 3.0), epsilon=sim["epsilon"],
        max_lag=sim["score_max_lag_min"], seed=sim["seed"], swarm=config["swarm"])
 end
+
+"""
+Rows first..last of the simulation list, as dictionaries with the columns of a regular simulations.csv:
+sim_id, model_id, hidden, EG_state, EG_rates, GE_state, GE_rates, HE_state, HE_rates, HG_state, HG_rates,
+fold_EG, fold_GE, fold_HE, fold_HG, h12, h21, h23, h32 (and seed, for expanded runs).
+A state is one state ("3"), several states that each regulate ("1+2"), or "R" (Rsum).
+"""
+function read_rows(cfg, first, last)
+    cfg.expanded || return read_csv(joinpath(cfg.run_dir, "simulations.csv"))[first:last]
+    models = Dict(row["architecture_id"] => row for row in read_csv(joinpath(cfg.run_dir, "expanded_models.csv")))
+    rows = Dict{String,String}[]
+    open(joinpath(cfg.run_dir, "expanded_simulations.csv")) do io
+        clean(text) = String(strip(replace(text, "\"" => "")))
+        header = clean.(split(readline(io), ','))
+        for (i, line) in enumerate(eachline(io))             # line i is sim_id i
+            i < first && continue
+            i > last && break
+            point = Dict(zip(header, clean.(split(line, ','))))
+            model = models[point["architecture_id"]]
+            state(edge) = model["$(edge)_source_kind"] == "reporter_count" ? "R" : model["$(edge)_states"]
+            group = model["group"]
+            push!(rows, merge(Dict(name => point[name] for name in ("sim_id", "fold_EG", "fold_GE", "fold_HE", "fold_HG",
+                                                                   "h12", "h21", "h23", "h32")),
+                              Dict("model_id" => model["architecture_id"], "seed" => point["point_seed"],
+                                   "hidden" => group == "H2" ? "H2" : startswith(group, "H3") ? "H3" : "none"),
+                              Dict("$(edge)_state" => state(edge) for edge in ("EG", "GE", "HE", "HG")),
+                              Dict("$(edge)_rates" => model["$(edge)_rates"] for edge in ("EG", "GE", "HE", "HG"))))
+        end
+    end
+    rows
+end
+
+"Number of simulations in the list (for the swarm file)."
+count_rows(cfg) = countlines(joinpath(cfg.run_dir, cfg.expanded ? "expanded_simulations.csv" : "simulations.csv")) - 1
 
 # ---------------------------------------------------------------------------
 # 2. Model: connections, states and base rates
 # ---------------------------------------------------------------------------
 
-"One connection: while unit `source` is in `state`, rate `rate` of gene `target` is multiplied by the fold."
+"One connection: while unit `source` is in one of `states`, rate `rate` of gene `target` is multiplied by the fold."
 struct Edge
     source::Int    # 1 = E, 2 = G, 3 = H
-    state::Int     # promoter state 1 to 3 (hidden state for H), or 4 = "R": StochasticGene's Rsum,
-                   # every occupied reporter position of the source gene adds one coupling effect
+    states::Vector{Int}  # promoter states 1 to 3 (hidden states for H) that regulate, any of them (e.g. [1, 2]);
+                   # or [4] = "R": StochasticGene's Rsum, every occupied reporter position adds one coupling effect
     target::Int    # 1 = E, 2 = G
     rate::Int      # index into RATE_NAMES
     gamma::Float64 # fold - 1 of this connection (fold_EG, fold_GE, fold_HE or fold_HG)
@@ -108,11 +159,11 @@ function sstate(model, s)
     mod(s - 1, npromoter(model)) + 1, code % 8, div(code, 8)
 end
 
-"How many coupling effects a connection contributes in this state: 1 if its source is in the regulating promoter
-(or hidden) state, else 0; for R, the number of occupied reporter positions of the source gene (0 to 3)."
+"How many coupling effects a connection contributes in this state: 1 if its source is in one of the regulating
+promoter (or hidden) states, else 0; for R, the number of occupied reporter positions of the source gene (0 to 3)."
 function activity(edge, p, bits_E, bits_G)
-    edge.state == 4 && return count_ones(edge.source == 1 ? bits_E : bits_G)
-    Int(pstate(p)[edge.source] == edge.state)
+    edge.states == [4] && return count_ones(edge.source == 1 ? bits_E : bits_G)
+    Int(pstate(p)[edge.source] in edge.states)
 end
 
 """
@@ -226,20 +277,25 @@ function base_rates(model, fitted, matching)
     error("could not match the fitted average rates of $(model.id)")
 end
 
-"Build the model of one simulations.csv row."
+"Build the model of one row of the simulation list (see read_rows)."
 function build_model(row, fitted, matching)
     nh = row["hidden"] == "none" ? 1 : row["hidden"] == "H2" ? 2 : 3
     edges = Edge[]
-    function connect(column, source, state, target, fold)        # fold: the simulations.csv column with this connection's fold
-        for name in split(row[column], '+'; keepempty=false)
-            push!(edges, Edge(source, state, target, findfirst(==(name), RATE_NAMES), parse(Float64, row[fold]) - 1))
+    # Results generated before the folds were split per connection have one "fold" column.
+    fold(edge) = haskey(row, "fold_$edge") ? row["fold_$edge"] : row["fold"]
+    function connect(edge, source, states, target)
+        for name in split(row["$(edge)_rates"], '+'; keepempty=false)
+            push!(edges, Edge(source, states, target, findfirst(==(name), RATE_NAMES), parse(Float64, fold(edge)) - 1))
         end
     end
-    gene_state(text) = text == "R" ? 4 : parse(Int, text)                               # EG_state / GE_state: 1, 2, 3 or R (Rsum)
-    isempty(row["EG_rates"]) || connect("EG_rates", 1, gene_state(row["EG_state"]), 2, "fold_EG")   # E regulates G
-    isempty(row["GE_rates"]) || connect("GE_rates", 2, gene_state(row["GE_state"]), 1, "fold_GE")   # G regulates E
-    connect("HE_rates", 3, nh == 2 ? 2 : 1, 1, "fold_HE")        # H2: hidden state 2 regulates both genes
-    connect("HG_rates", 3, nh == 2 ? 2 : 3, 2, "fold_HG")        # H3: hidden state 1 regulates E, state 3 regulates G
+    states(text) = text == "R" ? [4] : parse.(Int, split(text, '+'))                     # "3", "1+2" or "R" (Rsum)
+    # Hidden units regulate from fixed states unless the list says otherwise:
+    # H2: state 2 regulates both genes; H3: state 1 regulates E, state 3 regulates G.
+    hidden_states(edge, default) = isempty(get(row, "$(edge)_state", "")) ? [default] : states(row["$(edge)_state"])
+    isempty(row["EG_rates"]) || connect("EG", 1, states(row["EG_state"]), 2)               # E regulates G
+    isempty(row["GE_rates"]) || connect("GE", 2, states(row["GE_state"]), 1)               # G regulates E
+    isempty(row["HE_rates"]) || connect("HE", 3, hidden_states("HE", nh == 2 ? 2 : 1), 1)
+    isempty(row["HG_rates"]) || connect("HG", 3, hidden_states("HG", nh == 2 ? 2 : 3), 2)
     hidden_rates = Float64[parse(Float64, row[name]) for name in ("h12", "h21", "h23", "h32")[1:2*(nh-1)]]
     clipped = any(unclipped_factor(edges, p, bits_E, bits_G, edge.target, edge.rate) < MIN_FACTOR
                   for edge in edges, p in 1:9*nh, bits_E in 0:7, bits_G in 0:7)
@@ -298,8 +354,9 @@ function simulate_stochasticgene(model, cfg)
     # so no unit may start in a state that regulates. Three adjustments, for the StochasticGene call only:
     #   H3: the hidden states are renumbered. Its state 1 is our middle state 2, its state 2 is our state 1
     #       (regulates E), state 3 stays state 3 (regulates G). H2 needs nothing (state 2 regulates).
-    #   A gene regulating from promoter state 1: "state 1 multiplies the rate by fold" is written the
-    #       equivalent way round: the rate is fold times higher, and states 2 and 3 divide it by fold.
+    #   A connection whose regulating states include state 1 (after renumbering) is written the equivalent
+    #       way round: the rate is fold times higher, and every other state divides it by fold. This is exact
+    #       because no rate here is regulated by more than one connection.
     #   R is StochasticGene's Rsum: one connection from each reporter position (source states 4, 5, 6).
     renumber(state) = model.nh == 3 ? (2, 1, 3)[state] : state
     hidden_transitions = model.nh == 3 ? ((2, 1), (1, 2), (1, 3), (3, 1)) : GENE_TRANSITIONS[1:2]    # order of h12 h21 h23 h32
@@ -307,18 +364,18 @@ function simulate_stochasticgene(model, cfg)
     connections = NTuple{4,Int}[]       # (source unit, source state, target unit, target rate)
     gammas = Float64[]                  # one coupling strength per connection
     for edge in model.edges
-        if edge.source != 3 && edge.state == 1
-            base[edge.target, edge.rate] *= 1 + edge.gamma
-            for state in (2, 3)
-                push!(connections, (unit(edge.source), state, unit(edge.target), edge.rate))
-                push!(gammas, 1 / (1 + edge.gamma) - 1)
-            end
-        else
-            states = edge.source == 3 ? (renumber(edge.state),) : edge.state == 4 ? (4, 5, 6) : (edge.state,)
-            for state in states
-                push!(connections, (unit(edge.source), state, unit(edge.target), edge.rate))
-                push!(gammas, edge.gamma)
-            end
+        count(other -> (other.target, other.rate) == (edge.target, edge.rate), model.edges) == 1 ||
+            error("$(model.id): $(RATE_NAMES[edge.rate]) is regulated by more than one connection")
+        states = edge.states == [4] ? [4, 5, 6] : edge.source == 3 ? renumber.(edge.states) : edge.states
+        gamma = edge.gamma
+        if 1 in states                                  # the unit starts in a regulating state: write it the other way round
+            base[edge.target, edge.rate] *= 1 + gamma
+            states = setdiff(1:(edge.source == 3 ? model.nh : 3), states)
+            gamma = 1 / (1 + gamma) - 1
+        end
+        for state in states
+            push!(connections, (unit(edge.source), state, unit(edge.target), edge.rate))
+            push!(gammas, gamma)
         end
     end
     rates = Float64[]
@@ -503,7 +560,8 @@ end
 
 "One replicate dataset of one simulation: its curves and its ON fractions / reporter means."
 function simulate_replicate(row, model, replicate, cfg)
-    seed = cfg.seed + 1000 * parse(Int, row["sim_id"]) + replicate
+    seed = haskey(row, "seed") ? parse(UInt64, row["seed"]) + UInt64(replicate) :      # expanded runs: the generator's point_seed
+           cfg.seed + 1000 * parse(Int, row["sim_id"]) + replicate
     counts = if cfg.simulator == "fast"
         simulate_fast(model, cfg, Xoshiro(seed))
     else
@@ -514,11 +572,14 @@ function simulate_replicate(row, model, replicate, cfg)
 end
 
 fmt(x) = isfinite(x) ? @sprintf("%.8g", x) : "NA"
-mean_se(values) = (mean(values), std(values) / sqrt(length(values)))
+mean_se(values) = (mean(values), length(values) > 1 ? std(values) / sqrt(length(values)) : NaN)
 
 "Simulate rows first_id to last_id of simulations.csv and write their curves and metrics."
 function run_simulations(rows, cfg, first_id, last_id)
-    models = [build_model(row, cfg.fitted, cfg.rate_matching) for row in rows]
+    models = Vector{Model}(undef, length(rows))
+    Threads.@threads :dynamic for i in eachindex(rows)
+        models[i] = build_model(rows[i], cfg.fitted, cfg.rate_matching)
+    end
     nclipped = count(model -> model.clipped, models)
     nclipped > 0 && println("$nclipped of $(length(models)) simulations have a rate multiplier clipped at $MIN_FACTOR")
     jobs = [(i, replicate) for i in eachindex(rows) for replicate in 1:cfg.replicates]
@@ -529,17 +590,27 @@ function run_simulations(rows, cfg, first_id, last_id)
 
     folder = mkpath(joinpath(cfg.run_dir, "results"))
     stem = @sprintf("%06d-%06d", first_id, last_id)
-    curves_path = joinpath(folder, "curves_$stem.csv")
+    curves_path = joinpath(folder, cfg.expanded ? "curves_$stem.f32" : "curves_$stem.csv")
     metrics_path = joinpath(folder, "metrics_$stem.csv")
     score_names = ["$(name)_$(observable)_$(pair)" for observable in OBSERVABLES for (pair, _, _) in PAIRS
                    for name in ("nrmse", "ccc")]
     base_names = ["base_$(gene)_$(RATE_NAMES[k])" for gene in ("E", "G") for k in 1:5]      # R12 R21 R23 R32 Initiate
     metric_names = ("on_E", "on_G", "reporters_E", "reporters_G")
     replicate_names = ["$(name)_rep$(r)" for name in metric_names for r in 1:cfg.replicates]
+    if cfg.expanded                                     # the rows of every .f32 curves file, written by every job
+        layout_path = joinpath(folder, "curve_layout.csv")
+        open(layout_path * ".tmp.$(getpid())", "w") do io
+            println(io, "observable,pair,lag_frames,lag_min")
+            for bin in results[1].curves
+                println(io, join((bin.observable, bin.pair, bin.lag, fmt(bin.lag * cfg.interval)), ','))
+            end
+        end
+        mv(layout_path * ".tmp.$(getpid())", layout_path; force=true)
+    end
     # Write to temporary files first, so that a killed job never leaves a half-written result.
     open(curves_path * ".tmp", "w") do curves_io
         open(metrics_path * ".tmp", "w") do metrics_io
-            println(curves_io, "sim_id,observable,pair,lag_frames,lag_min,mean,se," * join(["rep$r" for r in 1:cfg.replicates], ','))
+            cfg.expanded || println(curves_io, "sim_id,observable,pair,lag_frames,lag_min,mean,se," * join(["rep$r" for r in 1:cfg.replicates], ','))
             println(metrics_io, "sim_id,model_id,on_E,on_E_se,on_G,on_G_se,reporters_E,reporters_E_se," *
                                 "reporters_G,reporters_G_se," * join(vcat(score_names, base_names, replicate_names, "clipped"), ','))
             for (i, row) in enumerate(rows)
@@ -547,9 +618,13 @@ function run_simulations(rows, cfg, first_id, last_id)
                 bins = replicates[1].curves                                   # same lag bins in every replicate
                 values = hcat([[bin.value for bin in r.curves] for r in replicates]...)
                 means = [mean_se(values[b, :]) for b in eachindex(bins)]
-                for (b, bin) in enumerate(bins)                                # mean, SE, then every replicate
-                    println(curves_io, join((row["sim_id"], bin.observable, bin.pair, bin.lag, fmt(bin.lag * cfg.interval),
-                                             fmt.(means[b])..., fmt.(values[b, :])...), ','))
+                if cfg.expanded                                                # mean and SE as 32-bit numbers
+                    write(curves_io, Float32[x for b in eachindex(bins) for x in means[b]])
+                else
+                    for (b, bin) in enumerate(bins)                            # mean, SE, then every replicate
+                        println(curves_io, join((row["sim_id"], bin.observable, bin.pair, bin.lag, fmt(bin.lag * cfg.interval),
+                                                 fmt.(means[b])..., fmt.(values[b, :])...), ','))
+                    end
                 end
                 cells = String[row["sim_id"], row["model_id"]]
                 for k in 1:4                                                  # on_E, on_G, reporters_E, reporters_G
@@ -580,7 +655,8 @@ end
 function write_swarm(config_path, cfg, nrows)
     s = cfg.swarm
     project = isempty(s["julia_project"]) ? "" : " --project=$(s["julia_project"])"
-    command = "$(s["julia"]) --threads=$(s["threads"])$project $(abspath(@__FILE__)) $(abspath(config_path))"
+    profile = cfg.expanded ? " --profile $(cfg.profile)" : ""
+    command = "$(s["julia"]) --threads=$(s["threads"])$project $(abspath(@__FILE__)) $(abspath(config_path))$profile"
     per_job = s["simulations_per_job"]
     lines = ["$command $start $(min(start + per_job - 1, nrows))" for start in 1:per_job:nrows]
     path = joinpath(cfg.run_dir, "simulations.swarm")
@@ -592,9 +668,11 @@ end
 
 # ---------------------------------------------------------------------------
 
-length(ARGS) in (1, 2, 3) || error("usage: julia 3_run_simulations.jl config.toml [--swarm | FIRST LAST]")
-const CONFIG = read_config(ARGS[1])
-const ROWS = read_csv(joinpath(CONFIG.run_dir, "simulations.csv"))
+const USAGE = "usage: julia 3_run_simulations.jl CONFIG [--profile NAME] [--swarm | FIRST LAST]"
+const PROFILE_AT = findfirst(==("--profile"), ARGS)
+const POSITIONAL = [a for (i, a) in enumerate(ARGS) if PROFILE_AT === nothing || !(i in (PROFILE_AT, PROFILE_AT + 1))]
+length(POSITIONAL) in (1, 2, 3) || error(USAGE)
+const CONFIG = read_config(POSITIONAL[1], PROFILE_AT === nothing ? "full" : ARGS[PROFILE_AT + 1])
 if CONFIG.simulator == "stochasticgene" && !("--swarm" in ARGS)
     using StochasticGene
     # StochasticGene stops when a coupled rate's multiplier (1 + sum of the active gammas) is not positive.
@@ -618,8 +696,8 @@ if CONFIG.simulator == "stochasticgene" && !("--swarm" in ARGS)
     end
 end
 if "--swarm" in ARGS
-    write_swarm(ARGS[1], CONFIG, length(ROWS))
+    write_swarm(POSITIONAL[1], CONFIG, count_rows(CONFIG))
 else
-    first_row, last_row = length(ARGS) == 3 ? parse.(Int, ARGS[2:3]) : (1, length(ROWS))
-    run_simulations(ROWS[first_row:last_row], CONFIG, first_row, last_row)
+    first_row, last_row = length(POSITIONAL) == 3 ? parse.(Int, POSITIONAL[2:3]) : (1, count_rows(CONFIG))
+    run_simulations(read_rows(CONFIG, first_row, last_row), CONFIG, first_row, last_row)
 end

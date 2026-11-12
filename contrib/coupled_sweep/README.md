@@ -14,6 +14,20 @@ E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit.
 Needs Python 3.11+ with numpy, pandas and matplotlib, Julia, and R for step 0. StochasticGene is only
 needed for `simulator = "stochasticgene"`.
 
+## Two kinds of run
+
+- **Regular**: `config.toml` and `1_generate_models.py`, as in the steps below.
+- **Expanded**: `config_expanded.toml` and `1_generate_models_expanded.py`: subsets of source states (for example
+  1+2: regulates in either state), subsets of 1 to 4 regulated rates, and separate folds for every connection,
+  sampled over ranges. Generate with
+  `python3 1_generate_models_expanded.py config_expanded.toml --profile limited` (or `full`; add `--count-only` to
+  see the size first). Then run steps 3 to 7 below with `config_expanded.toml --profile limited` (or `full`) in
+  place of `config.toml`; `--profile` goes after the config file, for example
+  `julia -t 12 3_run_simulations.jl config_expanded.toml --profile full --swarm`.
+  Expanded runs save each simulation's curves as mean and SE only, in compact binary files
+  (`results/curves_*.f32`, rows listed in `results/curve_layout.csv`); ON fractions of every replicate are in the
+  metrics files as usual.
+
 ## Steps
 
 **0. Compute the experimental data** (once). Arguments: your correlation R file, the CCAT1 and MYC
