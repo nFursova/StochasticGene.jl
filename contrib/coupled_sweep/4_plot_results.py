@@ -267,13 +267,13 @@ def blocks_at(levels, depth):
 def panel_marks(levels, height):
     """What to draw on a heatmap panel that is `height` points high. levels: block names of its rows, coarse to fine.
     Returns the rows above which a white line goes (the finest level whose blocks are at least 1.5 points high),
-    and (positions, names, font size) of the finest level whose names fit, or None."""
+    and (positions, names, font size, level) of the finest level whose names fit at 4 points or more, or None."""
     rows, lines, names = len(levels[0]), [], None
     for depth in range(len(levels)):
         starts, labels = blocks_at(levels, depth)
         if 1 < len(starts) <= min(height / 1.5, rows / 2):
             lines = starts[1:]
-        if 1 < len(starts) <= height / 3:
+        if 1 < len(starts) <= height / 5:
             names = ((starts + np.r_[starts[1:], rows]) / 2, list(labels), min(6.0, 0.8 * height / len(starts)), depth)
     return lines, names
 
@@ -315,11 +315,11 @@ def heatmap_figure(title, panels, x_edges, limit, colorbar_label, column_titles=
                                       textcoords="offset points", ha="right", va="center", fontsize=6, fontweight="bold")
         axes[i, 0].set_ylabel(panel["label"], rotation=0, ha="right", va="center", fontsize=8, labelpad=48)
     for axis, text in zip(axes[0], column_titles):
-        axis.set_title(text, fontsize=7.5)
+        axis.set_title(text, fontsize=6.5)
     for axis in axes[-1]:
         axis.set_xlabel(x_label, fontsize=8)
-    figure.suptitle(title, x=0.04, ha="left", fontsize=11, fontweight="bold")
-    figure.subplots_adjust(left=0.3, right=0.87, top=0.95, bottom=0.05)
+    figure.suptitle(title, x=0.04, y=0.985, ha="left", fontsize=11, fontweight="bold")
+    figure.subplots_adjust(left=0.3, right=0.87, top=0.93 if len(column_titles) > 1 else 0.95, bottom=0.05)
     figure.colorbar(image, cax=figure.add_axes([0.9, 0.35, 0.015, 0.3]), label=colorbar_label, extend="both")
     return figure
 
@@ -362,9 +362,9 @@ def group_heatmap(table, curves, experiment, group, observable, pair, title):
               dict(label="", height=45, arrays=[mean_curves(curves, ordered, rows) for ordered in (part, by_nrmse, by_ccc)],
                    levels=[[part[name].to_numpy() for name in BLOCKS], model_blocks(by_nrmse), model_blocks(by_ccc)])]
     return heatmap_figure(title, panels, bin_edges(lags), 2 * np.nanmax(np.abs(target)), "correlation (blue negative, red positive)",
-                          column_titles=["in parameter order\n(hidden rates, then fold; smallest on top)",
-                                         "each model type sorted by NRMSE\n(best on top)",
-                                         "each model type sorted by CCC\n(best on top)"], x_label="lag (min)")
+                          column_titles=["in parameter order\n(hidden rates, then fold;\nsmallest on top)",
+                                         "each model type\nsorted by NRMSE\n(best on top)",
+                                         "each model type\nsorted by CCC\n(best on top)"], x_label="lag (min)")
 
 
 def on_fraction_heatmap(table, experiment_on):
