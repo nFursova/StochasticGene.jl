@@ -40,6 +40,8 @@ HIDDEN_GROUPS = {
 # A regulated rate is multiplied by 1 + (fold - 1) for every active coupling effect: fold above 1 activates,
 # fold below 1 inhibits, fold 1 does nothing.
 PARAMETERS = ["fold_EG", "fold_GE", "fold_HE", "fold_HG", "h12", "h21", "h23", "h32"]
+# Extensive sweep: every regulated rate of a connection has its own fold, e.g. fold_EG_R12 and fold_EG_R23.
+RATE_FOLDS = [f"fold_{edge}_{rate}" for edge in ("EG", "GE", "HE", "HG") for rate in ("R12", "R21", "R23", "R32", "Initiate")]
 
 
 def model(group, name, EG="", GE="", HE="", HG="", EG_state="3", GE_state="3", control=False):
@@ -84,35 +86,42 @@ def swept_parameters(m, sweep):
 
     free: {parameter: its grid values (grid mode) or its [min, max] (extensive mode)}.
     tied: {parameter: the parameter it is set equal to}.
-    - Gene-to-gene folds (fold_EG, fold_GE): the grid uses every listed fold and its inverse (1 / fold, inhibition).
-      Reciprocal models use the same fold in both directions when reciprocal_states is "same", and every pair of
-      folds when it is "all_pairs".
-    - Hidden folds (fold_HE, fold_HG): activation only. The grid uses one fold for both connections; the extensive
-      sweep samples the two independently.
+    - Grid: one fold per connection (fold_EG, ...), multiplying all its regulated rates. Gene-to-gene folds use every
+      listed fold and its inverse (1 / fold, inhibition); reciprocal models use the same fold in both directions when
+      reciprocal_states is "same", every pair of folds when it is "all_pairs". Hidden folds: activation only, one
+      fold for both connections.
+    - Extensive: every regulated rate has its own fold (fold_EG_R12, fold_EG_R23, ...), each sampled over the range
+      of its connection in [sweep.extensive]; all of them independent (in "same" reciprocal models too).
     """
     grid = sweep["mode"] == "grid"
     gene_folds = sorted([1 / fold for fold in sweep["coupling_fold"]] + list(sweep["coupling_fold"]))
     extensive = extensive_ranges(sweep)
-    values = lambda name, grid_values: grid_values if grid else extensive[name]
     free, tied = {}, {}
+
+    def connection(edge, grid_values):
+        if grid:
+            free[f"fold_{edge}"] = grid_values
+        else:
+            free.update({f"fold_{edge}_{rate}": extensive[f"fold_{edge}"] for rate in m[f"{edge}_rates"].split("+")})
+
     if m["group"] == "E_to_G":
-        free["fold_EG"] = values("fold_EG", gene_folds)
+        connection("EG", gene_folds)
     elif m["group"] == "G_to_E":
-        free["fold_GE"] = values("fold_GE", gene_folds)
+        connection("GE", gene_folds)
     elif m["group"] == "reciprocal":
-        free["fold_EG"] = values("fold_EG", gene_folds)
-        if sweep.get("reciprocal_states", "same") == "same":
+        connection("EG", gene_folds)
+        if grid and sweep.get("reciprocal_states", "same") == "same":
             tied["fold_GE"] = "fold_EG"
         else:
-            free["fold_GE"] = values("fold_GE", gene_folds)
+            connection("GE", gene_folds)
     elif m["group"] in HIDDEN_GROUPS:
         spec = HIDDEN_GROUPS[m["group"]]
-        free["fold_HE"] = values("fold_HE", sweep["coupling_fold"])
+        connection("HE", sweep["coupling_fold"])
         if grid:
             tied["fold_HG"] = "fold_HE"
         else:
-            free["fold_HG"] = values("fold_HG", None)
-        free.update({rate: values(rate, sweep["hidden_rate"]) for rate in spec["rates"]})
+            connection("HG", None)
+        free.update({rate: sweep["hidden_rate"] if grid else extensive[rate] for rate in spec["rates"]})
         tied.update(spec["tied"])
     return free, tied
 
@@ -193,10 +202,10 @@ def main():
         for s in sets:
             simulation_rows.append(dict(
                 sim_id=len(simulation_rows) + 1, **{k: m[k] for k in m if k != "control"},
-                **{name: f"{s[name]:.6g}" if name in s else "" for name in PARAMETERS}))
+                **{name: f"{s[name]:.6g}" if name in s else "" for name in PARAMETERS + RATE_FOLDS}))
         model_rows.append(dict(
             **{k: m[k] for k in m if k != "control"}, control="yes" if m["control"] else "",
-            **{name: describe(m, name, sets, sweep) for name in PARAMETERS},
+            **{name: describe(m, name, sets, sweep) for name in PARAMETERS + RATE_FOLDS},
             n_simulations=len(sets), first_sim_id=first_id, last_sim_id=len(simulation_rows)))
 
     for name, rows in [("models.csv", model_rows), ("simulations.csv", simulation_rows)]:

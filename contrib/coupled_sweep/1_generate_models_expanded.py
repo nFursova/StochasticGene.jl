@@ -27,17 +27,18 @@ except ModuleNotFoundError:
     except ModuleNotFoundError:
         raise SystemExit("Use Python 3.11+, or install tomli for Python 3.10.") from None
 
-SCHEMA = "expanded-v1"
+SCHEMA = "expanded-v2"         # v2: one fold per regulated rate (fold_EG_R12, ...); v1 had one fold per connection
 RATES = ("R12", "R21", "R23", "R32", "Initiate")
 GROUPS = ("E_to_G", "G_to_E", "reciprocal", "H2", "H3_symmetric", "H3_asymmetric")
 EDGES = ("EG", "GE", "HE", "HG")
-AXES = ("fold_EG", "fold_GE", "fold_HE", "fold_HG", "h12", "h21", "h23", "h32")
+AXES = ("fold_EG", "fold_GE", "fold_HE", "fold_HG", "h12", "h21", "h23", "h32")      # names used in the config
+RATE_FOLDS = tuple(f"fold_{edge}_{rate}" for edge in EDGES for rate in RATES)          # sampled: one per regulated rate
 HIDDEN_FREE = {"H2": ("h12", "h21"), "H3_symmetric": ("h12", "h21"),
                "H3_asymmetric": ("h12", "h21", "h23", "h32")}
 ARCH_FIELDS = ["schema_version", "architecture_index", "architecture_id", "group", "hidden_nstates", "is_control"]
 ARCH_FIELDS += [f"{edge}_{field}" for edge in EDGES for field in ("source_kind", "states", "rates", "always_active")]
 ARCH_FIELDS += ["behavior_note", "sampling_axes", "n_parameter_sets", "first_sim_id", "last_sim_id"]
-POINT_FIELDS = ["schema_version", "sim_id", "point_id", "architecture_id", "parameter_index", *AXES,
+POINT_FIELDS = ["schema_version", "sim_id", "point_id", "architecture_id", "parameter_index", *AXES, *RATE_FOLDS,
                 "replicates", "point_seed"]
 
 
@@ -205,13 +206,20 @@ def all_architectures(settings):
 
 
 def axes_for(model):
-    return tuple(f"fold_{name}" for name in EDGES if name in model["connections"]) + HIDDEN_FREE.get(model["group"], ())
+    """Sampled axes of a model: one fold per regulated rate of every connection, then the hidden rates."""
+    return tuple(f"fold_{name}_{rate}" for name in EDGES if name in model["connections"]
+                 for rate in model["connections"][name]["rates"]) + HIDDEN_FREE.get(model["group"], ())
+
+
+def config_name(name):
+    """The config name of an axis: fold_EG_R12 takes its range and limited-profile value from fold_EG."""
+    return "_".join(name.split("_")[:2]) if name.startswith("fold_") else name
 
 
 def axis_range(name, settings):
     sampling = settings["config"]["sampling"]
     key = "coupling_fold" if name.startswith("fold_") else "hidden_rate"
-    return checked_range(sampling.get("ranges", {}).get(name, sampling[key]), name)
+    return checked_range(sampling.get("ranges", {}).get(config_name(name), sampling[key]), name)
 
 
 def log_levels(low, high, count):
@@ -231,8 +239,8 @@ def parameter_sets(model, settings):
             columns[name] = [1.0 if name.startswith("fold_") else settings["config"]["sampling"].get("control_hidden_rate", 1.0)]
             continue
         low, high = axis_range(name, settings)
-        if name in settings["profile"].get("values", {}):
-            value = float(settings["profile"]["values"][name])
+        if config_name(name) in settings["profile"].get("values", {}):
+            value = float(settings["profile"]["values"][config_name(name)])
             if not low <= value <= high:
                 raise ValueError(f"Limited-profile {name}={value} lies outside [{low}, {high}]")
             columns[name] = [value]
@@ -296,7 +304,8 @@ table{{border-collapse:collapse;width:100%}}td,th{{text-align:left;padding:8px;b
 {total['parameter_sets']:,} parameter sets; {total['independent_datasets']:,} independent datasets.</p>
 <table><tr><th>Family</th><th>Architectures</th><th>Controls</th><th>Parameter sets</th><th>Datasets</th></tr>{rows}</table>
 <p>Each noncontrol architecture has {settings['npoints']} parameter sets, each with {settings['replicates']} independent datasets.
-Selected promoter states are an OR condition and share one rate subset and one fold. Directions and hidden outputs have independent folds.</p>
+Selected promoter states are an OR condition and share one rate subset. Every regulated rate has its own fold
+(fold_EG_R12, fold_EG_R23, ...), sampled independently over the range of its connection.</p>
 <p>When included, Rsum is a separate observed-source option: each occupied reporter position adds (fold − 1),
 giving multiplier 1 + (fold − 1) × reporter_count. It is not a binary reporter-ON indicator.</p>
 <p>Rate subsets ({len(settings['rate_sets'])}): {html.escape(rate_choices)}</p>

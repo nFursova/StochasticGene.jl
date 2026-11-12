@@ -138,10 +138,12 @@ Each swarm job writes one `curves_` and one `metrics_` file, named by its first 
   can then still shift a gene's ON fraction. `"state_average"` averages over the time when the gene is in
   the state where that rate can act, which keeps ON fractions close to the uncoupled fit.
 - `grid`: every combination of `coupling_fold` (and its inverses, for gene-to-gene models) and `hidden_rate`.
-  Hidden models use one fold for both connections.
-- `extensive`: `n_extensive` random combinations per model. Each parameter is log-spaced over its own
-  [min, max] in `[sweep.extensive]`, each value used once; the hidden unit's two folds are sampled
-  independently. In `"same"` reciprocal models the shared fold uses the `fold_EG` range.
+  One fold per connection, multiplying all its regulated rates; hidden models use one fold for both connections.
+- `extensive`: `n_extensive` random combinations per model. Every regulated rate has its own fold (columns
+  `fold_EG_R12`, `fold_EG_R23`, ...), sampled over the range of its connection in `[sweep.extensive]`; hidden
+  rates likewise. All are independent, also in `"same"` reciprocal models (there `"same"` only means the same
+  source state). Without `[sweep.extensive]` the ranges come from the grid lists. The expanded generator also
+  gives every regulated rate its own fold.
 
 ## The two simulators
 
@@ -160,6 +162,11 @@ The report also computes the Mexican-hat shape of each cross-correlation: its me
 `hat_*` = centre minus the mean of the flanks, and `hat_shape_*` = true when the centre is positive and
 both flanks are negative. The windows are `HAT_CENTER_MIN` and `HAT_FLANKS_MIN` at the top of the script.
 All are columns of `ranked_scores.csv` and can be used in `score()`.
+
+`nrmse3_reporter` is the fit of all three curves: NRMSE of the cross-correlation + NRMSE of the CCAT1
+autocorrelation + NRMSE of the MYC autocorrelation (reporter count, equal weights). It ranks the extra report
+pages "by the sum of NRMSE" and the lists `top_10_architectures.csv` and `top_100_architectures.csv` in the run
+folder: the best architectures, each with its best parameter set (all its parameters and fits in one row).
 
 ## Notes
 

@@ -93,7 +93,8 @@ end
 """
 Rows first..last of the simulation list, as dictionaries with the columns of a regular simulations.csv:
 sim_id, model_id, hidden, EG_state, EG_rates, GE_state, GE_rates, HE_state, HE_rates, HG_state, HG_rates,
-fold_EG, fold_GE, fold_HE, fold_HG, h12, h21, h23, h32 (and seed, for expanded runs).
+fold_EG, fold_GE, fold_HE, fold_HG, h12, h21, h23, h32 (and seed, for expanded runs); with one fold per
+regulated rate, columns such as fold_EG_R12 replace the connection's fold.
 A state is one state ("3"), several states that each regulate ("1+2"), or "R" (Rsum).
 """
 function read_rows(cfg, first, last)
@@ -110,8 +111,8 @@ function read_rows(cfg, first, last)
             model = models[point["architecture_id"]]
             state(edge) = model["$(edge)_source_kind"] == "reporter_count" ? "R" : model["$(edge)_states"]
             group = model["group"]
-            push!(rows, merge(Dict(name => point[name] for name in ("sim_id", "fold_EG", "fold_GE", "fold_HE", "fold_HG",
-                                                                   "h12", "h21", "h23", "h32")),
+            push!(rows, merge(Dict(name => value for (name, value) in point            # sim_id, folds, hidden rates
+                                   if name == "sim_id" || startswith(name, "fold_") || startswith(name, "h")),
                               Dict("model_id" => model["architecture_id"], "seed" => point["point_seed"],
                                    "hidden" => group == "H2" ? "H2" : startswith(group, "H3") ? "H3" : "none"),
                               Dict("$(edge)_state" => state(edge) for edge in ("EG", "GE", "HE", "HG")),
@@ -281,11 +282,15 @@ end
 function build_model(row, fitted, matching)
     nh = row["hidden"] == "none" ? 1 : row["hidden"] == "H2" ? 2 : 3
     edges = Edge[]
-    # Results generated before the folds were split per connection have one "fold" column.
-    fold(edge) = haskey(row, "fold_$edge") ? row["fold_$edge"] : row["fold"]
+    # The fold of one regulated rate: its own column (fold_EG_R12) if set, else the connection's (fold_EG),
+    # else the single "fold" column of lists made before the folds were split per connection.
+    function fold(edge, rate)
+        value = get(row, "fold_$(edge)_$(rate)", "")
+        isempty(value) ? (haskey(row, "fold_$edge") ? row["fold_$edge"] : row["fold"]) : value
+    end
     function connect(edge, source, states, target)
         for name in split(row["$(edge)_rates"], '+'; keepempty=false)
-            push!(edges, Edge(source, states, target, findfirst(==(name), RATE_NAMES), parse(Float64, fold(edge)) - 1))
+            push!(edges, Edge(source, states, target, findfirst(==(name), RATE_NAMES), parse(Float64, fold(edge, name)) - 1))
         end
     end
     states(text) = text == "R" ? [4] : parse.(Int, split(text, '+'))                     # "3", "1+2" or "R" (Rsum)

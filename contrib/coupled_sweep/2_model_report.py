@@ -139,11 +139,19 @@ def regulated_rates(rows):
     return f'<p class="what">Rates multiplied, one model each ({len(rows)} models):</p><p>{chips(m[key] for m in rows)}</p>'
 
 
+def parameters_of(row):
+    """(column, label) of every parameter in a row of models.csv or of the simulation list, including the folds of
+    single regulated rates (fold_EG_R12: "fold of E regulating G, rate R12") of the extensive sweep."""
+    rate_folds = [(k, f'{PARAMETERS["_".join(k.split("_")[:2])]}, rate {k.split("_")[2]}')
+                  for k in row if k.startswith("fold_") and k.count("_") == 2]
+    return list(PARAMETERS.items()) + rate_folds
+
+
 def parameter_grid(m, mode):
     """The parameter values one model of the group is tested with."""
     rows, counts = [], []
-    for name, label in PARAMETERS.items():
-        text = m[name]
+    for name, label in parameters_of(m):
+        text = m.get(name) or ""
         if not text:
             continue
         if text.startswith("="):
@@ -204,7 +212,8 @@ def expanded_page(config, run_dir, profile):
     """Summary page of an expanded run (1_generate_models_expanded.py): too many architectures to draw one by one."""
     import pandas as pd
     models = pd.read_csv(run_dir / "expanded_models.csv", dtype=str)
-    points = pd.read_csv(run_dir / "expanded_simulations.csv", usecols=["architecture_id"] + list(PARAMETERS))
+    points = pd.read_csv(run_dir / "expanded_simulations.csv",
+                         usecols=lambda column: column == "architecture_id" or column in PARAMETERS or column.startswith("fold_"))
     points = points.merge(models[["architecture_id", "group", "is_control"]], on="architecture_id")
     replicates = config["profiles"][profile]["replicates"]
     source = lambda edge: models[f"{edge}_states"].mask(models[f"{edge}_source_kind"] == "reporter_count", "R")
@@ -227,9 +236,13 @@ def expanded_page(config, run_dir, profile):
                              f'<p class="what">regulated rates, {used[f"{edge}_rates"].nunique()} subsets:</p>'
                              f'<p>{chips(dict.fromkeys(used[f"{edge}_rates"]))}</p>')
         noncontrol = sims[sims["architecture_id"].isin(swept["architecture_id"])]
-        ranges = "".join(f'<tr><th>{PARAMETERS[name]}</th><td>{noncontrol[name].min():g} to {noncontrol[name].max():g} '
-                         f'({noncontrol[name].nunique():,} value{"s" * (noncontrol[name].nunique() > 1)})</td></tr>'
-                         for name in PARAMETERS if noncontrol[name].notna().any())
+        ranges = ""                                     # per connection fold (its single-rate folds pooled) and hidden rate
+        for name, label in PARAMETERS.items():
+            columns = [c for c in noncontrol if c == name or c.startswith(name + "_")]
+            values = pd.concat([noncontrol[c] for c in columns]).dropna()
+            if len(values):
+                each = " (one per regulated rate)" if any(c != name and noncontrol[c].notna().any() for c in columns) else ""
+                ranges += f"<tr><th>{label}{each}</th><td>{values.min():g} to {values.max():g}</td></tr>"
         combined = ("Every architecture combines one choice of each connection above: "
                     f"{len(swept):,} architectures, each with {int(noncontrol.groupby('architecture_id').size().max())} parameter sets.")
         cards.append(f'<section class="card"><header><h2>{group}</h2><p class="sub">{GROUP_TEXT[group]} '
@@ -280,7 +293,8 @@ def main():
         swept = [m for m in rows if m["control"] != "yes" or group == "uncoupled"]            # without the gamma = 0 control
         example = swept[0]
         n_sims = sum(int(m["n_simulations"]) for m in rows)
-        names = ", ".join(k for k in PARAMETERS if example[k] and not example[k].startswith("=")) if group != "uncoupled" else "none"
+        names = ", ".join(dict.fromkeys("_".join(k.split("_")[:2]) if k.startswith("fold_") else k for k, _ in parameters_of(example)
+                                        if example.get(k) and not example[k].startswith("="))) if group != "uncoupled" else "none"
         controls = len(rows) - len(swept)
         overview.append(f'<tr><td>{group}</td><td class="n">{len(swept)}</td><td>{names}</td>'
                         f'<td class="n">{example["n_simulations"]}</td><td class="n">{controls}</td><td class="n">{n_sims:,}</td></tr>')

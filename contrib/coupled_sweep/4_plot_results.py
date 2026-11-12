@@ -41,6 +41,7 @@ def score(metrics):
 
     `metrics` has one row per simulation with these columns:
         nrmse_<observable>_<pair>   0 = identical to experiment
+        nrmse3_<observable>         nrmse of EG + nrmse of EE + nrmse of GG (all three curves)
         ccc_<observable>_<pair>     1 = identical to experiment
         on_E, on_G, reporters_E, reporters_G
         center_<observable>, left_<observable>, right_<observable>   mean cross-correlation within +/- HAT_CENTER_MIN
@@ -59,13 +60,19 @@ CURVES = [(observable, pair, f"{pair_name}, {observable_name}")
                                   ("GG", "MYC autocorrelation")]
           for observable, observable_name in [("binary", "ON/OFF state"), ("reporter", "reporter count")]]
 # The metrics drawn per model group (violins) and against every swept parameter: (column, title, axis scale).
-METRICS = [(f"{name}_{observable}{pair}", f"{title}, {observable_name}", scale)
+# nrmse3_<observable>: NRMSE of the cross-correlation + CCAT1 autocorrelation + MYC autocorrelation (added in load).
+METRICS = [("nrmse3_reporter", "Sum of NRMSE of the cross-correlation and both autocorrelations, reporter count", "log")] + \
+          [(f"{name}_{observable}{pair}", f"{title}, {observable_name}", scale)
            for observable, observable_name in [("reporter", "reporter count"), ("binary", "ON/OFF state")]
            for name, pair, title, scale in [
                ("nrmse", "_EG", "NRMSE of the cross-correlation (0 = identical to experiment)", "log"),
                ("ccc", "_EG", "CCC of the cross-correlation (1 = identical to experiment)", "linear"),
                ("hat", "", "Mexican-hat depth of the cross-correlation (centre minus flanks)", "linear")]]
-PARAMETERS = ["fold_EG", "fold_GE", "fold_HE", "fold_HG", "h12", "h21", "h23", "h32"]    # columns of simulations.csv
+# Columns of the simulation list: connection folds, hidden rates, then one fold per regulated rate (extensive and
+# expanded sweeps: fold_EG_R12, fold_EG_R23, ...).
+PARAMETERS = ["fold_EG", "fold_GE", "fold_HE", "fold_HG", "h12", "h21", "h23", "h32"] + \
+             [f"fold_{edge}_{rate}" for edge in ("EG", "GE", "HE", "HG") for rate in ("R12", "R21", "R23", "R32", "Initiate")]
+connection_of = lambda name: "_".join(name.split("_")[:2]) if name.startswith("fold_") else name   # fold_EG_R12 -> fold_EG
 RATES = ["R12", "R21", "R23", "R32", "Initiate"]                      # the rates a connection can regulate
 BASE_COLUMNS = [f"base_{gene}_{rate}" for gene in "EG" for rate in RATES]
 INK, MUTED, BLUE = "#0b0b0b", "#898781", "#2a78d6"
@@ -146,13 +153,16 @@ def read_simulations(run_dir, expanded):
     A state is one state ("3"), several states that each regulate ("1+2"), or "R" (Rsum)."""
     if expanded:
         models = pd.read_csv(run_dir / "expanded_models.csv", dtype=str)
-        points = pd.read_csv(run_dir / "expanded_simulations.csv", usecols=["sim_id", "architecture_id"] + PARAMETERS)
+        points = pd.read_csv(run_dir / "expanded_simulations.csv", usecols=lambda column: column in ["sim_id", "architecture_id"] + PARAMETERS)
         table = pd.DataFrame(dict(model_id=models["architecture_id"], group=models["group"],
                                   hidden=models["group"].map({"H2": "H2", "H3_symmetric": "H3", "H3_asymmetric": "H3"}).fillna("none")))
         for edge in ("EG", "GE", "HE", "HG"):
             table[f"{edge}_state"] = models[f"{edge}_states"].mask(models[f"{edge}_source_kind"] == "reporter_count", "R")
             table[f"{edge}_rates"] = models[f"{edge}_rates"]
-        return points.rename(columns={"architecture_id": "model_id"}).merge(table, on="model_id")
+        table = points.rename(columns={"architecture_id": "model_id"}).merge(table, on="model_id")
+        for name in PARAMETERS:                         # files of the first expanded version have no per-rate folds
+            table[name] = table.get(name, np.nan)
+        return table
     table = pd.read_csv(run_dir / "simulations.csv", dtype={"EG_state": str, "GE_state": str}, low_memory=False)
     if "fold" in table:                                 # results made before the folds were split per connection
         for edge in ("EG", "GE", "HE", "HG"):
@@ -183,6 +193,8 @@ def load(config_path, profile):
     table = simulations.merge(metrics, on=["sim_id", "model_id"]).sort_values("sim_id").reset_index(drop=True)
     table["curve_row"] = curves.position.reindex(table["sim_id"]).to_numpy()
     hat_experiment = add_hat_metrics(table, curves, experiment)
+    for observable in ("reporter", "binary"):           # fit of all three curves together
+        table[f"nrmse3_{observable}"] = table[[f"nrmse_{observable}_{pair}" for pair in ("EG", "EE", "GG")]].sum(axis=1, min_count=3)
     table["score"] = score(table)
     table["rank"] = table["score"].rank(method="first").astype("Int64")
     table = display_order(table)
@@ -212,7 +224,8 @@ def regulated_rates(sim):
     for column, gene, source, fold in [("GE_rates", "E", f'G state {sim["GE_state"]}', "fold_GE"), ("HE_rates", "E", f'H state {sim["HE_state"]}', "fold_HE"),
                                        ("EG_rates", "G", f'E state {sim["EG_state"]}', "fold_EG"), ("HG_rates", "G", f'H state {sim["HG_state"]}', "fold_HG")]:
         if pd.notna(sim[column]):
-            regulated += [dict(gene=gene, rate=rate, by=source, fold=fold, index=BASE_COLUMNS.index(f"base_{gene}_{rate}"))
+            regulated += [dict(gene=gene, rate=rate, by=source, index=BASE_COLUMNS.index(f"base_{gene}_{rate}"),
+                               fold=f"{fold}_{rate}" if pd.notna(sim.get(f"{fold}_{rate}")) else fold)
                           for rate in sim[column].split("+")]
     return regulated
 
@@ -496,44 +509,51 @@ def best_per_architecture(table, column, ascending, top=None):
             .drop(columns=["group_rank", "type_rank"]))
 
 
-def architecture_heatmap(title, rows, curves, experiment, observable, column, ascending):
+def architecture_heatmap(title, rows, curves, experiment, observable, column, ascending, pairs=("EG",)):
     """One row per architecture (its best parameter set), all groups on one A4 page.
-    Left bar: model sub-type (neighbouring sub-types differ in colour; names where they fit). Middle: the
-    cross-correlation. Right bar: the fit of the row (darker = better)."""
-    lag_rows, lag_frames, lags = curves.rows(observable, "EG")
-    target, _ = experiment_curve(experiment, observable, "EG", lag_frames)
-    values = mean_curves(curves, rows, lag_rows)
+    Left bar: model sub-type (neighbouring sub-types differ in colour; names where they fit). Middle: one column per
+    curve in `pairs`, each with its own colour scale. Right bar: the fit of the row (darker = better)."""
+    titles = {"EG": "CCAT1 x MYC\ncross-correlation", "EE": "CCAT1\nautocorrelation", "GG": "MYC\nautocorrelation"}
+    panels = []                                         # per curve: lag edges, experiment, simulated rows, colour limit
+    for pair in pairs:
+        lag_rows, lag_frames, lags = curves.rows(observable, pair)
+        target, _ = experiment_curve(experiment, observable, pair, lag_frames)
+        panels.append((bin_edges(lags), target, mean_curves(curves, rows, lag_rows), 2 * np.nanmax(np.abs(target))))
     fit = rows[column].to_numpy(dtype=float)
     low, high = np.nanpercentile(fit, [2, 98]) if np.isfinite(fit).any() else (0, 1)
     groups = list(dict.fromkeys(rows["group"]))
     counts = [int((rows["group"] == group).sum()) for group in groups]
-    figure, axes = plt.subplots(len(groups) + 1, 3, figsize=A4, squeeze=False,
-                                gridspec_kw=dict(width_ratios=[0.035, 1, 0.035], wspace=0.03, hspace=0.07,
-                                                 height_ratios=[1] + [1 + 2 * np.log10(count) for count in counts]))
+    n = len(pairs)
+    figure, axes = plt.subplots(len(groups) + 1, n + 2, figsize=A4, squeeze=False,
+                                gridspec_kw=dict(width_ratios=[0.035 * n] + [1] * n + [0.035 * n], wspace=0.03 + 0.1 * (n > 1),
+                                                 hspace=0.07, height_ratios=[1] + [1 + 2 * np.log10(count) for count in counts]))
     points = 72 * A4[1] * 0.9 * 0.93 / (1 + sum(1 + 2 * np.log10(count) for count in counts))
-    x_edges, limit = bin_edges(lags), 2 * np.nanmax(np.abs(target))
-    for axis in axes.flat:                              # no ticks except the lag axis and the sub-type names set below
+    for axis in axes.flat:                              # no ticks except the lag axes and the sub-type names set below
         axis.set_yticks([])
         axis.set_xticks([])
         for spine in axis.spines.values():
             spine.set_visible(False)
-    axes[0, 1].pcolorfast(x_edges, [0, 1], np.ma.masked_invalid(target[None, :]), cmap=DIVERGING, vmin=-limit, vmax=limit)
+    images = []
+    for j, (x_edges, target, _, limit) in enumerate(panels, start=1):
+        images.append(axes[0, j].pcolorfast(x_edges, [0, 1], np.ma.masked_invalid(target[None, :]), cmap=DIVERGING, vmin=-limit, vmax=limit))
+        axes[0, j].set_title(titles[pairs[j - 1]], fontsize=7)
     axes[0, 0].set_ylabel("experiment", rotation=0, ha="right", va="center", fontsize=8, fontweight="bold")
+    colors = matplotlib.colors.ListedColormap(TYPE_COLORS)
     for i, (group, count) in enumerate(zip(groups, counts), start=1):
         inside = (rows["group"] == group).to_numpy()
         types = rows["block1"].to_numpy()[inside]
         starts, names = blocks_at([types], 0)
         number = np.cumsum(np.r_[True, types[1:] != types[:-1]]) - 1                   # sub-type number of every row
-        colors = matplotlib.colors.ListedColormap(TYPE_COLORS)
         axes[i, 0].pcolorfast([0, 1], np.arange(count + 1), (number % len(TYPE_COLORS))[:, None], cmap=colors,
                               vmin=-0.5, vmax=len(TYPE_COLORS) - 0.5)
-        image = axes[i, 1].pcolorfast(x_edges, np.arange(count + 1), np.ma.masked_invalid(values[inside]),
-                                      cmap=DIVERGING, vmin=-limit, vmax=limit)
-        fit_image = axes[i, 2].pcolorfast([0, 1], np.arange(count + 1), np.ma.masked_invalid(fit[inside][:, None]),
-                                          cmap=FIT_COLORS if not ascending else FIT_COLORS.reversed(), vmin=low, vmax=high)
         height = (1 + 2 * np.log10(count)) * points
-        if 1 < len(starts) <= height / 1.5:
-            axes[i, 1].hlines(starts[1:], x_edges[0], x_edges[-1], color="white", linewidth=0.5)
+        for j, (x_edges, _, values, limit) in enumerate(panels, start=1):
+            axes[i, j].pcolorfast(x_edges, np.arange(count + 1), np.ma.masked_invalid(values[inside]),
+                                  cmap=DIVERGING, vmin=-limit, vmax=limit)
+            if 1 < len(starts) <= height / 1.5:
+                axes[i, j].hlines(starts[1:], x_edges[0], x_edges[-1], color="white", linewidth=0.5)
+        fit_image = axes[i, -1].pcolorfast([0, 1], np.arange(count + 1), np.ma.masked_invalid(fit[inside][:, None]),
+                                           cmap=FIT_COLORS if not ascending else FIT_COLORS.reversed(), vmin=low, vmax=high)
         if len(starts) <= height / 5:                    # sub-type names, where they fit
             axes[i, 0].set_yticks((starts + np.r_[starts[1:], count]) / 2, list(names), fontsize=min(6.0, 0.8 * height / len(starts)))
             axes[i, 0].tick_params(axis="y", length=0, pad=2)
@@ -541,17 +561,27 @@ def architecture_heatmap(title, rows, curves, experiment, observable, column, as
                               fontsize=8, labelpad=48 if len(starts) <= height / 5 else 4)
     for axis in axes.flat:
         axis.invert_yaxis()
-    axes[-1, 1].set_xticks([-100, -50, 0, 50, 100])
-    axes[-1, 1].set_xlim(x_edges[0], x_edges[-1])
-    axes[-1, 1].tick_params(axis="x", length=3, colors=MUTED, labelcolor=INK, labelsize=7)
-    axes[-1, 1].set_xlabel("lag (min); positive = MYC after CCAT1", fontsize=8)
-    axes[0, 2].set_title("fit", fontsize=7)
-    axes[0, 0].set_title("type", fontsize=7)
+    for j, (x_edges, *_rest) in enumerate(panels, start=1):
+        axes[-1, j].set_xticks([-50, 0, 50] if n > 1 else [-100, -50, 0, 50, 100])
+        axes[-1, j].set_xlim(x_edges[0], x_edges[-1])
+        axes[-1, j].tick_params(axis="x", length=3, colors=MUTED, labelcolor=INK, labelsize=7)
+        axes[-1, j].set_xlabel("lag (min)" if n > 1 else "lag (min); positive = MYC after CCAT1", fontsize=8)
+    axes[0, -1].set_title("fit", fontsize=7)
+    if n == 1:
+        axes[0, 0].set_title("type", fontsize=7)
     figure.suptitle(title, x=0.04, y=0.985, ha="left", fontsize=11, fontweight="bold")
-    figure.subplots_adjust(left=0.3, right=0.84, top=0.94, bottom=0.05)
-    figure.colorbar(image, cax=figure.add_axes([0.9, 0.55, 0.015, 0.25]), label="correlation", extend="both")
+    figure.subplots_adjust(left=0.3, right=0.84, top=0.94, bottom=0.05 + 0.03 * (n > 1))
+    if n == 1:
+        figure.colorbar(images[0], cax=figure.add_axes([0.9, 0.55, 0.015, 0.25]), label="correlation", extend="both")
+    else:                                               # one small colour bar under each curve
+        for j, image in enumerate(images, start=1):
+            box = axes[-1, j].get_position()
+            figure.colorbar(image, cax=figure.add_axes([box.x0, 0.02, box.width, 0.008]), orientation="horizontal", extend="both")
+            figure.axes[-1].tick_params(labelsize=6)
+    fit_name = ("sum of NRMSE of the three curves" if column.startswith("nrmse3") else
+                f"{column.split('_')[0].upper()} of the cross-correlation")
     figure.colorbar(fit_image, cax=figure.add_axes([0.9, 0.2, 0.015, 0.25]),
-                    label=f"{column.split('_')[0].upper()} of the cross-correlation ({'lower' if ascending else 'higher'} is better)")
+                    label=f"{fit_name} ({'lower' if ascending else 'higher'} is better)")
     return figure
 
 
@@ -653,21 +683,24 @@ def metric_vs_parameters(table, column, scale):
     groups = [g for g in dict.fromkeys(table["group"]) if free_parameters(table[table["group"] == g])]
     if not groups:
         return None
-    shown = [name for name in PARAMETERS if any(name in free_parameters(table[table["group"] == g]) for g in groups)]
+    # One panel per connection fold and hidden rate; the folds of the single rates of a connection are pooled.
+    free = {g: free_parameters(table[table["group"] == g]) for g in groups}
+    shown = [name for name in PARAMETERS[:8] if any(connection_of(n) == name for g in groups for n in free[g])]
     figure, axes = plt.subplots(len(groups), len(shown), figsize=(2.2 * len(shown) + 0.8, 1.55 * len(groups) + 0.9),
                                 sharey=True, squeeze=False)
     for row, group in enumerate(groups):
         rows = table[table["group"] == group]
-        free = free_parameters(rows)
         for position, name in enumerate(shown):
             axis = axes[row, position]
-            if name not in free:
+            members = [n for n in free[group] if connection_of(n) == name]
+            if not members:
                 axis.set_visible(False)
                 continue
-            drawn = rows if len(rows) <= MAX_POINTS else rows.sample(MAX_POINTS, random_state=0)
-            axis.scatter(drawn[name], drawn[column], s=5, color=BLUE, alpha=0.12, linewidths=0, rasterized=True)
-            if rows[name].nunique() <= 12:
-                median = rows.groupby(name)[column].median()
+            pooled = pd.concat([rows[[n, column]].set_axis(["x", "y"], axis=1) for n in members]).dropna()
+            drawn = pooled if len(pooled) <= MAX_POINTS else pooled.sample(MAX_POINTS, random_state=0)
+            axis.scatter(drawn["x"], drawn["y"], s=5, color=BLUE, alpha=0.12, linewidths=0, rasterized=True)
+            if pooled["x"].nunique() <= 12:
+                median = pooled.groupby("x")["y"].median()
                 axis.plot(median.index, median.to_numpy(), color=INK, linewidth=1.2, marker="o", markersize=3)
             axis.set_xscale("log")
             if scale == "log":
@@ -941,6 +974,25 @@ def main():
          "Every curve of each top simulation (blue, mean ± SE) against experiment (black) and the uncoupled control (grey, dashed).")
 
     names = {"reporter": "reporter count", "binary": "ON/OFF state"}
+    if "reporter" in observables:                       # fit of all three curves: pages and the top-10 / top-100 lists
+        column = "nrmse3_reporter"
+        best = table.sort_values(column, na_position="last").drop_duplicates("model_id")
+        keep = ["model_id", "group", "block1", "sim_id", column, "nrmse_reporter_EG", "nrmse_reporter_EE", "nrmse_reporter_GG",
+                "ccc_reporter_EG", "hat_reporter", "hat_shape_reporter", "on_E", "on_G", "EG_state", "EG_rates", "GE_state",
+                "GE_rates", "HE_state", "HE_rates", "HG_state", "HG_rates"] + PARAMETERS
+        for n in (10, 100):
+            listing = best.head(n)[keep].rename(columns={"block1": "model_type", "sim_id": "best_sim_id"}).dropna(axis=1, how="all")
+            listing.insert(0, "rank", range(1, len(listing) + 1))
+            listing.to_csv(run_dir / f"top_{n}_architectures.csv", index=False)
+        for top, section, what in [(None, "Best parameter set of every architecture", "every architecture"),
+                                   (TOP_ARCHITECTURES, f"Top {TOP_ARCHITECTURES} architectures", f"the {TOP_ARCHITECTURES} best architectures")]:
+            title = f"Reporter count, all three curves: {what}, best parameter set by the sum of NRMSE"
+            save(section, architecture_heatmap(title, best_per_architecture(table, column, True, top), curves, experiment, "reporter",
+                                               column, True, pairs=[p for p in ("EG", "EE", "GG") if p in pairs]),
+                 f"architectures_{'top' if top else 'all'}_reporter_by_nrmse3", title,
+                 "Best parameter set of each architecture by the sum of NRMSE of the cross-correlation and both autocorrelations "
+                 "(reporter count). One row per architecture, grouped by model group and sub-type (left bar) and sorted by fit "
+                 "within each sub-type, best on top. Right bar: the fit (darker = better). Each curve has its own colour scale.")
     for observable in [o for o in ("reporter", "binary") if o in observables]:
         for metric, ascending in [("nrmse", True), ("ccc", False)]:
             column = f"{metric}_{observable}_EG"

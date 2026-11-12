@@ -28,8 +28,8 @@ coupling_fold = [0.003, 300.0]         # fold range of E -> G and G -> E: below 
 hidden_rate = [0.01, 100.0]          # retain current config_v3 hidden-rate endpoints, /min
 control_hidden_rate = 1.0
 # Every free axis is independently shuffled across parameter_sets log-spaced levels.
-# One fold is shared by all selected target rates/states of ONE connection.
-# Different connections have independent fold axes: EG, GE, HE, HG.
+# Every regulated rate of a connection has its own fold axis (fold_EG_R12, fold_EG_R23, ...), sampled over the
+# range of its connection (fold_EG, fold_GE, fold_HE, fold_HG below). All states of one connection share it.
 # All-state sources are included as requested, even though rate matching cancels their fold.
 
 [sampling.ranges]
