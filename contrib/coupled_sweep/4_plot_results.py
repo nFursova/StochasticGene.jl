@@ -126,6 +126,7 @@ def load(config_path):
     hat_experiment = add_hat_metrics(table, curves, experiment)
     table["score"] = score(table)
     table["rank"] = table["score"].rank(method="first").astype("Int64")
+    table = display_order(table)
     done = f'{len(table):,} of {len(simulations):,} simulations have results'
     print(done)
     statistic = config["inputs"]["rate_statistic"]
@@ -188,6 +189,42 @@ def add_hat_metrics(table, curves, experiment):
     return reference
 
 
+BLOCKS = ["block1", "block2", "block3"]      # names of the blocks a simulation belongs to, from coarse to fine
+
+
+def display_order(table):
+    """Sort the simulations for the heatmaps and name the blocks they form (columns block1, block2, block3).
+
+    Order: model group; the fold-1 control first; source state; regulated rates; hidden-unit rates; folds
+    (all from smallest to largest). Blocks, coarse to fine:
+        E_to_G        E1                  E1_R12
+        G_to_E        G1                  G1_R12
+        reciprocal    E1/G1               E1_R12              E1_R12 · G1_R21
+        hidden        H2 R12              h12 0.01 h21 0.1    (H3 asymmetric: also h23, h32)
+    """
+    text = lambda column: table[column].fillna("")
+    number = lambda column: table[column].map(lambda value: f"{value:g}", na_action="ignore").fillna("")
+    group = table["group"]
+    e, g = "E" + text("EG_state"), "G" + text("GE_state")
+    e_rates, g_rates = e + "_" + text("EG_rates"), g + "_" + text("GE_rates")
+    hidden = group.map({"H2": "H2", "H3_symmetric": "H3s", "H3_asymmetric": "H3a"}).fillna("") + " " + text("HE_rates")
+    hidden_first = "h12 " + number("h12") + " h21 " + number("h21")
+    kinds = [group == "E_to_G", group == "G_to_E", group == "reciprocal", table["hidden"] != "none"]
+    table = table.assign(
+        block1=np.select(kinds, [e, g, e + "/" + g, hidden], default=group),
+        block2=np.select(kinds, [e_rates, g_rates, e_rates, hidden_first], default=group))
+    table["block3"] = np.select([kinds[2], group == "H3_asymmetric"],
+                                [e_rates + " · " + g_rates, hidden_first + " h23 " + number("h23") + " h32 " + number("h32")],
+                                default=table["block2"])
+    control = table["model_id"].str.endswith("gamma0").to_numpy()
+    table.loc[control, BLOCKS] = "control"
+    first_seen = lambda column: pd.Categorical(table[column], categories=table[column].dropna().unique()).codes
+    state = lambda column: table[column].map({"1": 0, "2": 1, "3": 2, "R": 3}).fillna(-1)
+    keys = [first_seen("group"), ~control, state("EG_state"), state("GE_state"), first_seen("EG_rates"), first_seen("GE_rates"),
+            first_seen("HE_rates")] + [table[name].fillna(-1) for name in PARAMETERS[4:] + PARAMETERS[:4]]
+    return table.iloc[np.lexsort(keys[::-1])].reset_index(drop=True)
+
+
 def sorted_within_groups(table, column, ascending=True):
     """`table` with the order of the model groups kept and the simulations of each group sorted by `column`."""
     order = {group: i for i, group in enumerate(dict.fromkeys(table["group"]))}
@@ -217,93 +254,117 @@ def bin_edges(centers):
     return np.concatenate([[2 * centers[0] - middle[0]], middle, [2 * centers[-1] - middle[-1]]])
 
 
-def heatmap_figure(title, panels, x_edges, limit, colorbar_label, column_titles=("",), x_label="", x_ticks=None, row_labels=None):
+def blocks_at(levels, depth):
+    """Start rows and names of the blocks at one level: a block ends where any name down to that level changes."""
+    change = np.zeros(len(levels[0]), dtype=bool)
+    change[0] = True
+    for names in levels[:depth + 1]:
+        change[1:] |= names[1:] != names[:-1]
+    starts = np.flatnonzero(change)
+    return starts, levels[depth][starts]
+
+
+def panel_marks(levels, height):
+    """What to draw on a heatmap panel that is `height` points high. levels: block names of its rows, coarse to fine.
+    Returns the rows above which a white line goes (the finest level whose blocks are at least 1.5 points high),
+    and (positions, names, font size) of the finest level whose names fit, or None."""
+    rows, lines, names = len(levels[0]), [], None
+    for depth in range(len(levels)):
+        starts, labels = blocks_at(levels, depth)
+        if 1 < len(starts) <= min(height / 1.5, rows / 2):
+            lines = starts[1:]
+        if 1 < len(starts) <= height / 3:
+            names = ((starts + np.r_[starts[1:], rows]) / 2, list(labels), min(6.0, 0.8 * height / len(starts)), depth)
+    return lines, names
+
+
+def heatmap_figure(title, panels, x_edges, limit, colorbar_label, column_titles=("",), x_label="", x_ticks=None):
     """An A4 page of heatmap panels stacked vertically, with one or more columns.
 
     panels: dictionaries with label, height (relative), arrays (one [row, heatmap column] array per column) and
-    optionally lines (per column, the rows above which a thin separating line is drawn).
-    row_labels: (positions, texts) written beside the rows of the first column of the last panel."""
+    optionally levels (per column, the block names of the rows from coarse to fine; see panel_marks).
+    Blocks are separated by thin white lines in every column and named beside the first column."""
     figure, axes = plt.subplots(len(panels), len(column_titles), figsize=A4, squeeze=False,
-                                gridspec_kw=dict(height_ratios=[panel["height"] for panel in panels], hspace=0.07, wspace=0.05))
+                                gridspec_kw=dict(height_ratios=[panel["height"] for panel in panels], hspace=0.07,
+                                                 wspace=0.18 if len(column_titles) > 1 else 0.05))
+    points = 72 * A4[1] * 0.9 * 0.93 / sum(panel["height"] for panel in panels)        # height of one unit, in points
     for i, panel in enumerate(panels):
         for j, values in enumerate(panel["arrays"]):
             axis = axes[i, j]
             image = axis.pcolorfast(x_edges, np.arange(len(values) + 1), np.ma.masked_invalid(values),
                                     cmap=DIVERGING, vmin=-limit, vmax=limit)
             axis.invert_yaxis()                                     # first row on top
-            lines = panel.get("lines", [[]] * len(panel["arrays"]))[j]
-            axis.hlines(lines, x_edges[0], x_edges[-1], color="white", linewidth=0.5)
             axis.set_yticks([])
             axis.tick_params(labelbottom=i == len(panels) - 1, length=3, colors=MUTED, labelcolor=INK, labelsize=7)
             if x_ticks is not None:
                 axis.set_xticks(*x_ticks)
             for spine in axis.spines.values():
                 spine.set_visible(False)
-        axes[i, 0].set_ylabel(panel["label"], rotation=0, ha="right", va="center", fontsize=8)
+            if panel.get("levels") is None or panel["levels"][j] is None:
+                continue
+            lines, names = panel_marks(panel["levels"][j], panel["height"] * points)
+            axis.hlines(lines, x_edges[0], x_edges[-1], color="white", linewidth=0.5)
+            if j == 0 and names is not None:
+                positions, texts, size, depth = names
+                axis.set_yticks(positions, texts, fontsize=size)
+                axis.tick_params(axis="y", length=0, pad=2)
+                if depth > 0 and len(column_titles) > 1:            # also name the coarsest blocks, further left
+                    starts, coarse = blocks_at(panel["levels"][j], 0)
+                    for position, text in zip((starts + np.r_[starts[1:], len(values)]) / 2, coarse):
+                        axis.annotate(text, (0, position), xycoords=("axes fraction", "data"), xytext=(-78, 0),
+                                      textcoords="offset points", ha="right", va="center", fontsize=6, fontweight="bold")
+        axes[i, 0].set_ylabel(panel["label"], rotation=0, ha="right", va="center", fontsize=8, labelpad=48)
     for axis, text in zip(axes[0], column_titles):
-        axis.set_title(text, fontsize=8)
+        axis.set_title(text, fontsize=7.5)
     for axis in axes[-1]:
         axis.set_xlabel(x_label, fontsize=8)
-    if row_labels is not None:
-        axes[-1, 0].set_yticks(row_labels[0], row_labels[1], fontsize=5)
-        axes[-1, 0].tick_params(axis="y", length=0)
     figure.suptitle(title, x=0.04, ha="left", fontsize=11, fontweight="bold")
-    figure.subplots_adjust(left=0.24, right=0.87, top=0.95, bottom=0.05)
+    figure.subplots_adjust(left=0.3, right=0.87, top=0.95, bottom=0.05)
     figure.colorbar(image, cax=figure.add_axes([0.9, 0.35, 0.015, 0.3]), label=colorbar_label, extend="both")
     return figure
 
 
-def overview_heatmap(title, table, values, x_edges, limit, colorbar_label, top_row=None, **options):
+def overview_heatmap(title, table, values, x_edges, limit, colorbar_label, top_row=None, blocks=True, **options):
     """Every model group on one page, rows in the order of `table` (values = array [simulation, heatmap column]).
-    A panel of 1 simulation is as high as the experiment strip; bigger groups are higher, but not to scale."""
+    A panel of 1 simulation is as high as the experiment strip; bigger groups are higher, but not to scale.
+    blocks: separate and name the model types (only meaningful when `table` is in display order)."""
     panels = [] if top_row is None else [dict(label="experiment", height=1, arrays=[top_row[None, :]])]
     for group in dict.fromkeys(table["group"]):
         inside = (table["group"] == group).to_numpy()
-        models = table["model_id"].to_numpy()[inside]
-        lines = np.flatnonzero(models[1:] != models[:-1]) + 1                       # where the model changes
         count = int(inside.sum())
-        panels.append(dict(label=f"{group}\n{count:,} simulation{'s' * (count > 1)}",
-                           height=1 + 2 * np.log10(count), arrays=[values[inside]],
-                           lines=[lines if len(lines) <= 12 else []]))
+        panels.append(dict(label=f"{group}\n{count:,} simulation{'s' * (count > 1)}", height=1 + 2 * np.log10(count),
+                           arrays=[values[inside]],
+                           levels=[[table[name].to_numpy()[inside] for name in BLOCKS]] if blocks else None))
     return heatmap_figure(title, panels, x_edges, limit, colorbar_label, **options)
 
 
-def curve_heatmap(table, curves, experiment, observable, pair, title):
+def curve_heatmap(table, curves, experiment, observable, pair, title, blocks=True):
     """One curve of every simulation, all model groups, rows in the order of `table`; top strip = experiment."""
     rows, lag_frames, lags = curves.rows(observable, pair)
     target, _ = experiment_curve(experiment, observable, pair, lag_frames)
     limit = 2 * np.nanmax(np.abs(target))        # colour scale set by the experiment; stronger simulations saturate
     return overview_heatmap(title, table, mean_curves(curves, table, rows), bin_edges(lags), limit,
-                            "correlation (blue negative, red positive)", top_row=target,
+                            "correlation (blue negative, red positive)", top_row=target, blocks=blocks,
                             x_label="lag (min); positive = MYC after CCAT1" if pair == "EG" else "lag (min)")
 
 
-def block_labels(models):
-    """Where the model blocks are along the rows, and their names (coarser names if there are too many models)."""
-    names = np.array([model.split("__", 1)[-1] for model in models])
-    for labels in (names, np.array([name.split("__")[0] for name in names])):
-        starts = np.flatnonzero(np.r_[True, labels[1:] != labels[:-1]])
-        if len(starts) <= 45:
-            return (starts + np.r_[starts[1:], len(labels)]) / 2, list(labels[starts])
-    return None
-
-
-def group_heatmap(table, curves, experiment, group, observable, title):
-    """The cross-correlations of one model group on a full page, three times: in model and parameter order,
-    sorted by NRMSE, and sorted by CCC (best on top)."""
-    rows, lag_frames, lags = curves.rows(observable, "EG")
-    target, _ = experiment_curve(experiment, observable, "EG", lag_frames)
+def group_heatmap(table, curves, experiment, group, observable, pair, title):
+    """One curve of one model group on a full page, in three columns: in parameter order (model types separated and
+    named), and sorted by NRMSE and by CCC within each model type (best on top)."""
+    rows, lag_frames, lags = curves.rows(observable, pair)
+    target, _ = experiment_curve(experiment, observable, pair, lag_frames)
     part = table[table["group"] == group]
-    orders = [("model, then parameters", part),
-              ("sorted by NRMSE, best on top", part.sort_values(f"nrmse_{observable}_EG")),
-              ("sorted by CCC, best on top", part.sort_values(f"ccc_{observable}_EG", ascending=False))]
-    models = part["model_id"].to_numpy()
-    lines = np.flatnonzero(models[1:] != models[:-1]) + 1
+    part = part.assign(model_order=pd.factorize(part["model_id"])[0])            # model types in display order
+    by_nrmse = part.sort_values(["model_order", f"nrmse_{observable}_{pair}"])
+    by_ccc = part.sort_values(["model_order", f"ccc_{observable}_{pair}"], ascending=[True, False])
+    model_blocks = lambda ordered: [ordered["model_id"].to_numpy()]
     panels = [dict(label="experiment", height=1, arrays=[target[None, :]] * 3),
-              dict(label="", height=45, arrays=[mean_curves(curves, ordered, rows) for _, ordered in orders],
-                   lines=[lines if len(lines) <= 60 else [], [], []])]
+              dict(label="", height=45, arrays=[mean_curves(curves, ordered, rows) for ordered in (part, by_nrmse, by_ccc)],
+                   levels=[[part[name].to_numpy() for name in BLOCKS], model_blocks(by_nrmse), model_blocks(by_ccc)])]
     return heatmap_figure(title, panels, bin_edges(lags), 2 * np.nanmax(np.abs(target)), "correlation (blue negative, red positive)",
-                          column_titles=[name for name, _ in orders], x_label="lag (min)", row_labels=block_labels(models))
+                          column_titles=["in parameter order\n(hidden rates, then fold; smallest on top)",
+                                         "each model type sorted by NRMSE\n(best on top)",
+                                         "each model type sorted by CCC\n(best on top)"], x_label="lag (min)")
 
 
 def on_fraction_heatmap(table, experiment_on):
@@ -654,7 +715,7 @@ def main():
     if len(sys.argv) != 2:
         raise SystemExit(__doc__)
     config, run_dir, table, curves, experiment, experiment_on, done, fitted, hat_experiment = load(Path(sys.argv[1]).resolve())
-    table.drop(columns="curve_row").sort_values("rank").to_csv(run_dir / "ranked_scores.csv", index=False)
+    table.drop(columns=["curve_row"] + BLOCKS).sort_values("rank").to_csv(run_dir / "ranked_scores.csv", index=False)
     folder = run_dir / "plots"
     folder.mkdir(exist_ok=True)
     for old in [*folder.glob("*.pdf"), *folder.glob("*.png")]:
@@ -679,28 +740,33 @@ def main():
         save("Metrics against each swept parameter", metric_vs_parameters(table, column, scale), f"vs_parameters_{column}", title,
              "One point per simulation; the black line joins the medians.")
 
-    rows_text = "Each row is one simulation (the mean of its replicates). Top strip: experiment. Panel heights grow with the number of simulations, not to scale."
+    rows_text = ("Each row is one simulation (the mean of its replicates). Top strip: experiment. White lines separate model types "
+                 "(source state and regulated rates; for hidden models also the hidden rates), named where there is room. "
+                 "Within a type, rows go from the smallest to the largest parameter values. Panel heights are not to scale.")
     for observable, pair, name in CURVES:
-        save("Heatmaps of all model groups, in model and parameter order", curve_heatmap(table, curves, experiment, observable, pair, name),
+        save("Heatmaps of all model groups, by model type and parameters", curve_heatmap(table, curves, experiment, observable, pair, name),
              f"heatmap_{pair}_{observable}", name, rows_text)
-    save("Heatmaps of all model groups, in model and parameter order", on_fraction_heatmap(table, experiment_on),
+    save("Heatmaps of all model groups, by model type and parameters", on_fraction_heatmap(table, experiment_on),
          "heatmap_on_fraction", "ON fraction relative to experiment", "Rows as in the curve heatmaps.")
 
     for observable, name in [("reporter", "reporter count"), ("binary", "ON/OFF state")]:
         for metric, ascending in [("nrmse", True), ("ccc", False)]:
             ordered = sorted_within_groups(table, f"{metric}_{observable}_EG", ascending)
             title = f"CCAT1 x MYC cross-correlation, {name}: sorted by {metric.upper()} within each group"
-            save("Cross-correlation heatmaps, sorted within each model group", curve_heatmap(ordered, curves, experiment, observable, "EG", title),
-                 f"heatmap_EG_{observable}_by_{metric}", title, "Best simulations on top of each group. " + rows_text)
+            save("Cross-correlation heatmaps, each whole group sorted by fit",
+                 curve_heatmap(ordered, curves, experiment, observable, "EG", title, blocks=False),
+                 f"heatmap_EG_{observable}_by_{metric}", title, "Best simulations on top of each group; model types are mixed.")
 
     for group in dict.fromkeys(table["group"]):
         if (table["group"] == group).sum() < 2:
             continue
-        for observable, name in [("reporter", "reporter count"), ("binary", "ON/OFF state")]:
-            title = f"{group}: CCAT1 x MYC cross-correlation, {name}"
-            save("Cross-correlation heatmaps, one model group per page", group_heatmap(table, curves, experiment, group, observable, title),
-                 f"group_{group}_{observable}", title,
-                 "Left: in model and parameter order, with the model names. Middle and right: the same simulations sorted by NRMSE and by CCC.")
+        for observable, pair, name in CURVES:
+            title = f"{group}: {name}"
+            save(f"One model group per page: {group}", group_heatmap(table, curves, experiment, group, observable, pair, title),
+                 f"group_{group}_{pair}_{observable}", title,
+                 "Left: by model type, then parameters; the names beside it give the model types. Middle and right: the same "
+                 "model types in the same order, each sorted by NRMSE and by CCC of this curve. The columns are independent: "
+                 "a row in one column is not the same simulation as the row beside it.")
 
     write_report(run_dir, config, done, table, curves, experiment, experiment_on, fitted, hat_experiment, plots)
     print(f"Wrote {run_dir / 'results_report.html'} (needs plots/ and explorer/ next to it) and {run_dir / 'ranked_scores.csv'}")
