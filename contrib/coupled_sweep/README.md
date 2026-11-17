@@ -12,6 +12,7 @@ E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit.
 | `4_plot_results.py` | Writes the results report (HTML), every plot as PDF and PNG, and the ranking |
 | `5_nearest_simulations.py` | Optional: the simulations of one architecture nearest a given fold or StochasticGene coupling γ (fold = 1 + γ), e.g. the value a direct fit found |
 | `6_trace_relationships.py` | Optional: how CCAT1 and MYC relate in decoded traces (burst-aligned averages, model-free fold of every architecture, between- vs within-cell correlation), no model fit |
+| `7_compare_folds.py` | Optional: the folds the shape-passing simulations need against the folds in the decoded traces, and `fit_candidates.csv`: the architectures to fit, with starting values |
 
 Needs Python 3.11+ with numpy, pandas and matplotlib, Julia, and R for step 0. StochasticGene is only
 needed for `simulator = "stochasticgene"`.
@@ -118,6 +119,32 @@ Writes `relationships/relationships_report.html` and its tables:
 The results report (step 7) also shows, for every single-connection architecture, its cross-correlation at every
 fold tested, coloured from inhibition (blue) to activation (red), in a grid of source states by regulated rates.
 
+**10. (Optional) Which architectures to fit.** After step 7 (it writes `shape_passing_reporter.csv`) and step 9:
+
+```bash
+python3 7_compare_folds.py config.toml relationships
+```
+
+For every connection component (for example CCAT1 state 2 -> MYC R23) it plots the fold of every simulation inside the
+shape selection against the fold in the decoded traces, and writes `fit_candidates.csv`: every architecture with a
+simulation inside the selection, whether one of them is consistent with the data, and the parameters of its best
+simulation as starting values (StochasticGene coupling gamma = fold - 1).
+
+**11. (Optional) Check simulations the way the data are checked.** Folds measured from frames are pulled towards 1
+even from true states (CCAT1 changes state within a frame), and hidden-unit models have no fold to compare. So
+export the best simulation of each candidate and analyse it exactly like the data:
+
+```bash
+julia 3_run_simulations.jl config.toml --export-traces runs/grid/fit_candidates.csv
+```
+
+```bash
+for d in runs/grid/exported_traces/sim_*; do python3 6_trace_relationships.py $d/CCAT1_predictedtraces.csv $d/MYC_predictedtraces.csv $d/relationships --reference relationships; done
+```
+
+Each `relationships_report.html` then shows the simulation (colours) and the data (black): burst-aligned averages,
+rate ratios, and the correlations within and between cells. `--export-traces` also takes sim_ids, e.g. `12,57`.
+
 ## What ends up in the run folder
 
 | File | Written by | Contents |
@@ -193,7 +220,7 @@ NRMSE of the reporter cross-correlation by default; edit it to use any saved met
 The report also computes the Mexican-hat shape of each cross-correlation: its mean within ±10 min
 (`center_*`), its mean in the flanks from 20 to 60 min on each side (`left_*`, `right_*`), the depth
 `hat_*` = centre minus the mean of the flanks, and `hat_shape_*` = true when the centre is at least
-`center_min` and each flank is at most `flank_max` (`[report.shape]` in the config; defaults 0.01 and −0.01). The
+`center_min` and the mean of the two flanks is at most `flank_max` (`[report.shape]` in the config; defaults 0.01 and −0.01). The
 windows are `HAT_CENTER_MIN` and `HAT_FLANKS_MIN` at the top of the script.
 
 **Shape selection.** The report has two selections, switched by the "Shape selection" menu at the top:

@@ -23,6 +23,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.collections
+import matplotlib.ticker
 from matplotlib.colors import LinearSegmentedColormap
 
 PLOT_MAX_LAG_MIN = 120      # lag range shown in every plot
@@ -34,7 +35,7 @@ HAT_CENTER_MIN = 10         # Mexican-hat shape: the cross-correlation should be
 HAT_FLANKS_MIN = (20, 60)   # and negative between these lags (minutes) on both sides
 # Shape selection and combined score. These are defaults; [report] and [report.shape] in the config override them.
 HAT_CENTER_THRESHOLD = 0.01           # centre mean must be >= this
-HAT_FLANK_THRESHOLD = -0.01           # EACH flank mean must be <= this, not only their average
+HAT_FLANK_THRESHOLD = -0.01           # the mean of the two flanks must be <= this (the shaded area of the shape map)
 SHAPE_NRMSE_MAX = 0.9                 # second selection: shape AND NRMSE < this (None = no second selection)
 SHAPE_NRMSE_OF = "cross"              # "cross": cross-correlation NRMSE; "combined": combined score; "each": all 3 curves
 SHAPE_LABELLED_PAGES = True           # also draw the selection with every model labelled, HAT_MODELS_PER_PAGE per page
@@ -70,10 +71,10 @@ def configure(config):
 
 def shape_selections(table, observable):
     """The parameter-set selections of the shape pages: [(key, description, boolean mask over table rows)].
-    "shape": centre >= HAT_CENTER_THRESHOLD and each flank <= HAT_FLANK_THRESHOLD. "shape_nrmse": also NRMSE below
+    "shape": centre >= HAT_CENTER_THRESHOLD and mean of the flanks <= HAT_FLANK_THRESHOLD. "shape_nrmse": also NRMSE below
     SHAPE_NRMSE_MAX (of the cross-correlation, of the combined score, or of each of the three curves)."""
     shape = table[f"hat_shape_{observable}"].fillna(False).to_numpy(dtype=bool)
-    selections = [("shape", f"centre ≥ {HAT_CENTER_THRESHOLD:g}, each flank ≤ {HAT_FLANK_THRESHOLD:g}", shape)]
+    selections = [("shape", f"centre ≥ {HAT_CENTER_THRESHOLD:g}, mean of the flanks ≤ {HAT_FLANK_THRESHOLD:g}", shape)]
     if SHAPE_NRMSE_MAX is not None:
         if SHAPE_NRMSE_OF == "cross":
             good, what = table[f"nrmse_{observable}_EG"] < SHAPE_NRMSE_MAX, "cross-correlation NRMSE"
@@ -100,7 +101,7 @@ def score(metrics):
         center_<observable>, left_<observable>, right_<observable>   mean cross-correlation within +/- HAT_CENTER_MIN
                                     and in the left and right flanks (HAT_FLANKS_MIN)
         hat_<observable>            Mexican-hat depth: center minus the mean of the two flanks
-        hat_shape_<observable>      True if center >= HAT_CENTER_THRESHOLD and each flank <= HAT_FLANK_THRESHOLD
+        hat_shape_<observable>      True if center >= HAT_CENTER_THRESHOLD and (left + right) / 2 <= HAT_FLANK_THRESHOLD
     observable: binary (ON/OFF state) or reporter (reporter count)
     pair:       EG (CCAT1 x MYC cross-correlation), EE (CCAT1 autocorrelation), GG (MYC autocorrelation)
     Example of a combined score:  metrics["nrmse_reporter_EG"] + metrics["nrmse_binary_EG"]
@@ -312,8 +313,7 @@ def add_hat_metrics(table, curves, experiment):
             table[f"{name}_{observable}"] = np.nanmean(simulated[:, window], axis=1)
         center, left, right = (table[f"{name}_{observable}"] for name in windows)
         table[f"hat_{observable}"] = center - (left + right) / 2
-        table[f"hat_shape_{observable}"] = ((center >= HAT_CENTER_THRESHOLD) &
-                                            (left <= HAT_FLANK_THRESHOLD) & (right <= HAT_FLANK_THRESHOLD))
+        table[f"hat_shape_{observable}"] = (center >= HAT_CENTER_THRESHOLD) & ((left + right) / 2 <= HAT_FLANK_THRESHOLD)
         reference[observable] = {name: float(np.nanmean(target[window])) for name, window in windows.items()}
         reference[observable]["hat"] = reference[observable]["center"] - (reference[observable]["left"] + reference[observable]["right"]) / 2
     return reference
@@ -696,12 +696,15 @@ def architecture_heatmap(title, rows, curves, experiment, observable, column, as
     return figure
 
 
-def shape_map(table, observable, hat_experiment):
-    """Centre of the cross-correlation against the mean of its two flanks, one panel per group: every simulation of
-    the group in blue, the whole sweep in grey. Shading thresholds centre and mean flank; the qualifying
-    heatmap additionally requires each individual flank to pass. The cross is the experiment."""
+def shape_map(table, observable, hat_experiment, metric="nrmse", ascending=True):
+    """Centre of the cross-correlation against the mean of its two flanks, one panel per model group. The group's
+    simulations are coloured by their fit (`metric`; best drawn on top), the rest of the sweep is grey. The shaded
+    area is exactly the shape selection. Each title counts the group's architectures and simulations inside it.
+    The cross is the experiment, the diamond the uncoupled model."""
     x = table[f"center_{observable}"].to_numpy(dtype=float)
     y = ((table[f"left_{observable}"] + table[f"right_{observable}"]) / 2).to_numpy(dtype=float)
+    fit = table[fit_column(metric, observable)].to_numpy(dtype=float)
+    inside = table[f"hat_shape_{observable}"].fillna(False).to_numpy(dtype=bool)
     reference = hat_experiment[observable]
     ex, ey = reference["center"], (reference["left"] + reference["right"]) / 2
     finite = np.isfinite(x) & np.isfinite(y)
@@ -711,23 +714,34 @@ def shape_map(table, observable, hat_experiment):
     yl = np.r_[np.nanpercentile(y[finite], [5, 95]), ey, 0, HAT_FLANK_THRESHOLD]
     pad = lambda v: (np.nanmin(v) - 0.1 * max(np.nanmax(v) - np.nanmin(v), 0.05),
                      np.nanmax(v) + 0.1 * max(np.nanmax(v) - np.nanmin(v), 0.05))
+    (xmin, xmax), (ymin, ymax) = pad(xl), pad(yl)
     groups = [g for g in dict.fromkeys(table["group"]) if g != "uncoupled"]
     if not groups:
         return empty_figure("The shape map needs at least one coupled-model group")
+    good = np.isfinite(fit)
+    low, high = np.nanpercentile(fit[good], [2, 98]) if good.any() else (0, 1)
+    if metric != "ccc":
+        norm = matplotlib.colors.LogNorm(max(low, 1e-3), max(high, low * 1.01, 1e-3 * 1.01))
+        colours = FIT_COLORS.reversed()                 # lower = better = darker
+    else:
+        norm = matplotlib.colors.Normalize(low, high if high > low else low + 1e-3)
+        colours = FIT_COLORS
     ncol = 3
-    figure, axes = plt.subplots(int(np.ceil(len(groups) / ncol)), ncol, figsize=(10, 3.1 * np.ceil(len(groups) / ncol) + 0.6),
+    figure, axes = plt.subplots(int(np.ceil(len(groups) / ncol)), ncol, figsize=(10.5, 3.1 * np.ceil(len(groups) / ncol) + 0.9),
                                 sharex=True, sharey=True, squeeze=False)
     rng = np.random.default_rng(0)
     background = np.flatnonzero(finite)
     background = background if len(background) <= MAX_POINTS else rng.choice(background, MAX_POINTS, replace=False)
     uncoupled = table["group"].to_numpy() == "uncoupled"
+    group_of, model_of = table["group"].to_numpy(), table["model_id"].to_numpy()
     for axis, group in zip(axes.flat, groups):
-        (xmin, xmax), (ymin, ymax) = pad(xl), pad(yl)
         axis.fill_between([HAT_CENTER_THRESHOLD, xmax], ymin, HAT_FLANK_THRESHOLD, color="#e1e0d9", alpha=0.6, linewidth=0)
-        axis.scatter(x[background], y[background], s=3, color="#c3c2b7", alpha=0.3, linewidths=0, rasterized=True)
-        mine = np.flatnonzero((table["group"].to_numpy() == group) & finite)
+        axis.scatter(x[background], y[background], s=3, color="#c3c2b7", alpha=0.25, linewidths=0, rasterized=True)
+        mine = np.flatnonzero((group_of == group) & finite)
         mine = mine if len(mine) <= MAX_POINTS else rng.choice(mine, MAX_POINTS, replace=False)
-        axis.scatter(x[mine], y[mine], s=4, color=BLUE, alpha=0.25, linewidths=0, rasterized=True)
+        order = mine[np.argsort(np.where(np.isfinite(fit[mine]), fit[mine], np.inf if ascending else -np.inf))]
+        order = order[::-1] if ascending else order     # best last, so on top
+        image = axis.scatter(x[order], y[order], s=4, c=fit[order], cmap=colours, norm=norm, alpha=0.6, linewidths=0, rasterized=True)
         if uncoupled.any():
             axis.scatter(x[uncoupled], y[uncoupled], s=30, marker="D", facecolor="white", edgecolor=INK, linewidths=1, zorder=4)
         axis.scatter([ex], [ey], s=90, marker="X", color=INK, zorder=5)
@@ -737,7 +751,11 @@ def shape_map(table, observable, hat_experiment):
         axis.axhline(HAT_FLANK_THRESHOLD, color=INK, linewidth=0.7, linestyle="--", alpha=0.6)
         axis.set_xlim(xmin, xmax)
         axis.set_ylim(ymin, ymax)
-        axis.set_title(f"{group} ({len(np.flatnonzero(table['group'].to_numpy() == group)):,} simulations)", fontsize=9)
+        in_group = group_of == group
+        architectures = len(set(model_of[in_group]))
+        passing = len(set(model_of[in_group & inside]))
+        axis.set_title(f"{group}: {passing:,} of {architectures:,} architectures,\n"
+                       f"{int((in_group & inside).sum()):,} of {int(in_group.sum()):,} simulations in the shaded area", fontsize=8)
         axis.tick_params(labelsize=7, colors=MUTED, labelcolor=INK)
         for side in ("top", "right"):
             axis.spines[side].set_visible(False)
@@ -746,11 +764,18 @@ def shape_map(table, observable, hat_experiment):
     for axis in axes[-1]:
         axis.set_xlabel(f"centre: mean within ±{HAT_CENTER_MIN} min", fontsize=8)
     for axis in axes[:, 0]:
-        axis.set_ylabel(f"flanks: mean from {HAT_FLANKS_MIN[0]} to {HAT_FLANKS_MIN[1]} min", fontsize=8)
-    figure.suptitle(f"Blue = named family; grey = full sweep; X = experiment; ◇ = uncoupled\n"
-                   f"Shaded: centre ≥ {HAT_CENTER_THRESHOLD:g}, mean flanks ≤ {HAT_FLANK_THRESHOLD:g}; axes show central 90%",
-                   x=0.02, y=0.995, ha="left", fontsize=9, fontweight="bold")
-    figure.tight_layout(rect=(0, 0, 1, 0.93))
+        axis.set_ylabel(f"flanks: mean of {HAT_FLANKS_MIN[0]} to {HAT_FLANKS_MIN[1]} min,\nboth sides", fontsize=8)
+    figure.suptitle(f"Colour = {FIT_NAMES[metric]} (darker = better); grey = the rest of the sweep; "
+                    f"X = experiment; ◇ = uncoupled\nShaded = the shape selection: centre ≥ {HAT_CENTER_THRESHOLD:g}, "
+                    f"mean of the flanks ≤ {HAT_FLANK_THRESHOLD:g}. Axes show the central 90%",
+                    x=0.02, y=0.995, ha="left", fontsize=9, fontweight="bold")
+    figure.tight_layout(rect=(0, 0, 0.91, 0.92))
+    bar = figure.colorbar(image, cax=figure.add_axes([0.93, 0.25, 0.012, 0.5]))
+    bar.set_label(f"{FIT_NAMES[metric]} ({'lower' if ascending else 'higher'} is better)", fontsize=8)
+    plain = matplotlib.ticker.FuncFormatter(lambda value, _: f"{value:.2g}")
+    bar.ax.yaxis.set_major_formatter(plain)
+    bar.ax.yaxis.set_minor_formatter(plain)
+    bar.ax.tick_params(labelsize=6, which="both")
     return figure
 
 
@@ -922,7 +947,7 @@ def group_summary(table, metric="nrmse"):
                      f'{int(part["hat_shape_reporter"].sum()):,} ({100 * part["hat_shape_reporter"].mean():.0f}%)',
                      f'simulation {best["sim_id"]}: {best["model_id"]}; {parameter_text(best)}' if best is not None else "n/a"])
     return table_html(["Group", "Simulations", f"Best {FIT_NAMES[metric]}", f"Median {FIT_NAMES[metric]}",
-                       "Passing centre and both-flank thresholds (reporter)", "Best simulation"], rows)
+                       "Passing the shape thresholds (reporter)", "Best simulation"], rows)
 
 
 def top_table(table, experiment_on, hat_experiment, metric="nrmse"):
@@ -1186,7 +1211,7 @@ fewer simulations are shown). The individual replicates are in the results files
 parameter sets (extensive sweep), all of them are drawn and the other parameters are not held fixed.</p></section>
 
 <h2>Summary by model group</h2><section class="card">{summaries}</section>
-<p class="sub">Shape filter: mean cross-correlation ≥ {HAT_CENTER_THRESHOLD:g} within ±{HAT_CENTER_MIN} min and ≤ {HAT_FLANK_THRESHOLD:g} in EACH flank
+<p class="sub">Shape filter: mean cross-correlation ≥ {HAT_CENTER_THRESHOLD:g} within ±{HAT_CENTER_MIN} min, and the mean of the two flanks ≤ {HAT_FLANK_THRESHOLD:g}
 ({HAT_FLANKS_MIN[0]} to {HAT_FLANKS_MIN[1]} min on each side). Depth = centre minus the mean of the flanks. Experiment (reporter count):
 centre {hat["center"]:.3f}, left {hat["left"]:.3f}, right {hat["right"]:.3f}, depth {hat["hat"]:.3f}.</p>
 <h2>The {TOP_N} best simulations</h2><section class="card">{top_tables}
@@ -1303,12 +1328,14 @@ def main():
                          f"Selection: {text}. One best passing parameter set per architecture, with its full model label at left. "
                          "All passing architectures are included across the pages; the top-count selector does not truncate them.",
                          key=f"shape_selected_{observable}", metric=metric, page=page_index + 1, selection=key)
-        save("Shape map", shape_map(table, observable, hat_experiment), f"shape_map_{observable}",
-             f"Shape of the cross-correlation, {names[observable]}",
-             "Each point is a parameter set's mean curve across replicate datasets. Blue = the named model family; grey = the full sweep. "
-             f"Shading: centre ≥ {HAT_CENTER_THRESHOLD:g}, mean of the two flanks ≤ {HAT_FLANK_THRESHOLD:g}. The filtered heatmap "
-             "also requires EACH flank to pass; therefore not every point inside the shaded area necessarily qualifies. "
-             "X = experiment; diamond = uncoupled. Up to 50,000 points per scatter layer are drawn; selection uses all points.")
+        for metric, ascending in FIT_METRICS:
+            save("Shape map", shape_map(table, observable, hat_experiment, metric, ascending), f"shape_map_{observable}_by_{metric}",
+                 f"Shape of the cross-correlation, {names[observable]}, coloured by {FIT_NAMES[metric]}",
+                 "Each point is a parameter set's mean curve across replicate datasets, coloured by its fit (darker = better); grey = the "
+                 f"rest of the sweep. Shaded = the shape selection (centre ≥ {HAT_CENTER_THRESHOLD:g}, mean of the two flanks ≤ "
+                 f"{HAT_FLANK_THRESHOLD:g}); the panel titles count the architectures and simulations inside it. X = experiment; "
+                 "diamond = uncoupled. Up to 50,000 points per scatter layer are drawn; counts use all points.",
+                 key=f"shape_map_{observable}", metric=metric)
 
     for observable in [o for o in ("reporter", "binary") if o in observables]:
         for group in ("E_to_G", "G_to_E"):

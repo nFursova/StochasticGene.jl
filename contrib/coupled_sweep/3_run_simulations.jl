@@ -5,6 +5,10 @@ Step 3. Simulate a list of simulations and compare them with the experimental cu
     julia 3_run_simulations.jl config.toml --swarm        write <run_dir>/simulations.swarm (simulates nothing)
     julia -t 12 3_run_simulations.jl config.toml 1 12     simulate rows 1 to 12 (this is one swarm line)
     julia -t 12 3_run_simulations.jl config.toml          simulate every row on this machine
+    julia 3_run_simulations.jl config.toml --export-traces 57,1155,58429
+                                                          write the true promoter states and reporter counts of these
+                                                          simulations (one dataset each), in StochasticGene's
+                                                          predictedtraces format, for 6_trace_relationships.py
 
 Two kinds of run, recognised from the config file:
     regular    config.toml with [output] run_dir: reads <run_dir>/simulations.csv from 1_generate_models.py
@@ -24,6 +28,11 @@ Each run writes two files into <run_dir>/results/:
 
 Names: E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit. Both genes are the 3301 model:
 promoter states 1 <-> 2 <-> 3, initiation from state 3, three reporter positions.
+--export-traces takes sim_ids separated by commas, or a CSV file with a column sim_id or start_sim_id (for example
+fit_candidates.csv from 7_compare_folds.py). It always uses the fast simulator, whose states are exact, and writes
+<run_dir>/exported_traces/sim_<id>/CCAT1_predictedtraces.csv and MYC_predictedtraces.csv (columns Gstate_<i>,
+Rstate_<i>, Reporters_<i>; trace lengths as in the run), plus hidden_states.csv for hidden-unit models.
+
 Sections: 1 inputs, 2 model, 3 fast simulator, 4 StochasticGene simulator, 5 analysis, 6 run and swarm.
 =#
 using LinearAlgebra, SparseArrays, Random, Statistics, TOML, Printf
@@ -120,6 +129,57 @@ function read_rows(cfg, first, last)
         end
     end
     rows
+end
+
+"""
+Write the true promoter states and reporter counts of the simulations `sim_ids` (one dataset each, fast simulator)
+in StochasticGene's predictedtraces format, so that 6_trace_relationships.py can analyse them like the data.
+"""
+function export_traces(cfg, sim_ids)
+    for id in sim_ids
+        row = read_rows(cfg, id, id)[1]
+        model = build_model(row, cfg.fitted, cfg.rate_matching)
+        states = simulate_fast_states(model, cfg, Xoshiro(cfg.seed + 7919 * id))
+        folder = mkpath(joinpath(cfg.run_dir, "exported_traces", @sprintf("sim_%06d", id)))
+        decoded = [sstate(model, s) for s in states]               # (joint promoter state, bits_E, bits_G)
+        within(frame, trace) = frame <= cfg.lengths[trace]
+        for (gene, name) in ((1, "CCAT1"), (2, "MYC"))
+            open(joinpath(folder, "$(name)_predictedtraces.csv"), "w") do io
+                println(io, join(["$(column)_$trace" for trace in 1:cfg.ntraces for column in ("Gstate", "Rstate", "Reporters")], ","))
+                for frame in 1:cfg.nframes
+                    cells = String[]
+                    for trace in 1:cfg.ntraces
+                        if !within(frame, trace)
+                            append!(cells, ("", "", ""))
+                            continue
+                        end
+                        p, bits_E, bits_G = decoded[frame, trace]
+                        bits = gene == 1 ? bits_E : bits_G
+                        append!(cells, (string(pstate(p)[gene]), "\"[$(bits & 1), $((bits >> 1) & 1), $((bits >> 2) & 1)]\"",
+                                        string(count_ones(bits))))
+                    end
+                    println(io, join(cells, ","))
+                end
+            end
+        end
+        if model.nh > 1
+            open(joinpath(folder, "hidden_states.csv"), "w") do io
+                println(io, join(["Hstate_$trace" for trace in 1:cfg.ntraces], ","))
+                for frame in 1:cfg.nframes
+                    println(io, join([within(frame, trace) ? string(pstate(decoded[frame, trace][1])[3]) : "" for trace in 1:cfg.ntraces], ","))
+                end
+            end
+        end
+        println("sim $id ($(row["model_id"])): wrote $folder")
+    end
+end
+
+"The sim_ids after --export-traces: a comma-separated list, or a CSV file with a column sim_id or start_sim_id."
+function export_ids(text)
+    isfile(text) || return parse.(Int, split(text, ","))
+    rows = read_csv(text)
+    column = haskey(rows[1], "sim_id") ? "sim_id" : "start_sim_id"
+    unique(parse(Int, row[column]) for row in rows if !isempty(row[column]))
 end
 
 "Number of simulations in the list (for the swarm file)."
@@ -316,13 +376,13 @@ end
 """
 Uses the list of all states and transitions of the system (9 * nh * 8 * 8 states), starts each trace from
 the exact long-run distribution, so no burn-in is needed, and runs a standard Gillespie simulation.
-Returns reporter counts [frame, trace, gene].
+Returns the system state (see sindex) at every frame of every trace, [frame, trace].
 """
-function simulate_fast(model, cfg, rng)
+function simulate_fast_states(model, cfg, rng)
     destinations, rates = system_transitions(model, model.base)
     start = cumsum(stationary(destinations, rates))         # used to draw the starting state of each trace
     cumulative = cumsum.(rates)                             # used to draw which event happens next
-    counts = zeros(Int, cfg.nframes, cfg.ntraces, 2)
+    states = zeros(Int, cfg.nframes, cfg.ntraces)
     for trace in 1:cfg.ntraces
         s = min(searchsortedfirst(start, rand(rng)), length(start))
         next_event = randexp(rng) / cumulative[s][end]
@@ -332,10 +392,20 @@ function simulate_fast(model, cfg, rng)
                 s = destinations[s][min(choice, end)]
                 next_event += randexp(rng) / cumulative[s][end]
             end
-            _, bits_E, bits_G = sstate(model, s)
-            counts[frame, trace, 1] = count_ones(bits_E)
-            counts[frame, trace, 2] = count_ones(bits_G)
+            states[frame, trace] = s
         end
+    end
+    states
+end
+
+"Reporter counts [frame, trace, gene] of the fast simulation."
+function simulate_fast(model, cfg, rng)
+    states = simulate_fast_states(model, cfg, rng)
+    counts = zeros(Int, cfg.nframes, cfg.ntraces, 2)
+    for index in CartesianIndices(states)
+        _, bits_E, bits_G = sstate(model, states[index])
+        counts[index, 1] = count_ones(bits_E)
+        counts[index, 2] = count_ones(bits_G)
     end
     counts
 end
@@ -673,12 +743,14 @@ end
 
 # ---------------------------------------------------------------------------
 
-const USAGE = "usage: julia 3_run_simulations.jl CONFIG [--profile NAME] [--swarm | FIRST LAST]"
+const USAGE = "usage: julia 3_run_simulations.jl CONFIG [--profile NAME] [--swarm | FIRST LAST | --export-traces IDS]"
 const PROFILE_AT = findfirst(==("--profile"), ARGS)
-const POSITIONAL = [a for (i, a) in enumerate(ARGS) if PROFILE_AT === nothing || !(i in (PROFILE_AT, PROFILE_AT + 1))]
+const EXPORT_AT = findfirst(==("--export-traces"), ARGS)
+const VALUE_POSITIONS = vcat([[at, at + 1] for at in (PROFILE_AT, EXPORT_AT) if at !== nothing]...)
+const POSITIONAL = [a for (i, a) in enumerate(ARGS) if !(i in VALUE_POSITIONS)]
 length(POSITIONAL) in (1, 2, 3) || error(USAGE)
 const CONFIG = read_config(POSITIONAL[1], PROFILE_AT === nothing ? "full" : ARGS[PROFILE_AT + 1])
-if CONFIG.simulator == "stochasticgene" && !("--swarm" in ARGS)
+if CONFIG.simulator == "stochasticgene" && !("--swarm" in ARGS) && EXPORT_AT === nothing
     using StochasticGene
     # StochasticGene stops when a coupled rate's multiplier (1 + sum of the active gammas) is not positive.
     # Replace that one internal function, for this run only, so that the multiplier is clipped at MIN_FACTOR,
@@ -700,7 +772,9 @@ if CONFIG.simulator == "stochasticgene" && !("--swarm" in ARGS)
         return max(factor, $MIN_FACTOR)
     end
 end
-if "--swarm" in ARGS
+if EXPORT_AT !== nothing
+    export_traces(CONFIG, export_ids(ARGS[EXPORT_AT + 1]))
+elseif "--swarm" in ARGS
     write_swarm(POSITIONAL[1], CONFIG, count_rows(CONFIG))
 else
     first_row, last_row = length(POSITIONAL) == 3 ? parse.(Int, POSITIONAL[2:3]) : (1, count_rows(CONFIG))

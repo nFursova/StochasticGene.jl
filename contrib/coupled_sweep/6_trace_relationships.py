@@ -31,7 +31,10 @@ Writes into OUTPUT_FOLDER: relationships_report.html, plots/ (PDF and PNG of eve
    when data are few). exp(coefficient of the condition) = the fold. So
    cells that are simply more active, and a drift over the recording, do not count. Fitted as a conditional
    Poisson model (the cell levels are profiled out exactly); 95% interval from cluster-robust (by cell) standard
-   errors. Reported only with at least MIN_EVENTS (10) events in each condition and MIN_CELLS (20) cells that have
+   errors. Simple (ratio_simple): the back-of-the-envelope version, one formula over whole cells
+   [sum over cells of k_on * T_off / T] / [sum over cells of k_off * T_on / T] (k = transitions, T = frames at risk,
+   on/off = the condition holds or not), 95% interval from bootstrapping cells; compares within cells, but does not
+   adjust for drift. Regression reported only with at least MIN_EVENTS (10) events in each condition and MIN_CELLS (20) cells that have
    both conditions and an event. Pooled: all frames together, 95%
    interval from bootstrapping cells.
    rate_ratio_methods.csv: the same fold by other methods (pooled; Mantel-Haenszel within whole cells and within
@@ -290,11 +293,15 @@ def rate_ratios(cells, source, target, weights, dt, knots):
             T0c = np.bincount(table["cell"], ~holds, minlength=len(cells))
             with np.errstate(divide="ignore", invalid="ignore"):
                 pooled = lambda w: ((w @ k1c) / (w @ T1c)) / ((w @ k0c) / (w @ T0c))
-                boot = pooled(weights)
+                Tc = np.where(T1c + T0c > 0, T1c + T0c, 1)
+                simple = lambda w: (w @ (k1c * T0c / Tc)) / (w @ (k0c * T1c / Tc))     # Mantel-Haenszel over whole cells
+                boot, boot_simple = pooled(weights), simple(weights)
                 fold, low, high, note = regression_fold(table, name, knots, dt)
                 out.append(dict(regulator=GENES[source], regulated=GENES[target], source_state=name, rate=rate,
                                 architecture=f"{source}{name} -> {target} {rate}",
                                 ratio_within_cells=fold, low_within=low, high_within=high, note=note,
+                                ratio_simple=simple(np.ones(len(cells))), low_simple=interval(boot_simple)[0],
+                                high_simple=interval(boot_simple)[1],
                                 ratio_pooled=pooled(np.ones(len(cells))), low_pooled=interval(boot)[0], high_pooled=interval(boot)[1],
                                 rate_when_on_per_min=k1c.sum() / T1c.sum() / dt, rate_when_off_per_min=k0c.sum() / T0c.sum() / dt,
                                 events_on=int(k1c.sum()), events_off=int(k0c.sum()),
@@ -454,7 +461,7 @@ def style(axis):
     axis.tick_params(labelsize=7, colors=MUTED, labelcolor=INK)
 
 
-def plot_aligned(results, dt):
+def plot_aligned(results, dt, reference=None):
     pairs = list(results)
     kinds = list(results[pairs[0]])
     figure, axes = plt.subplots(len(pairs), len(kinds), figsize=(13, 2.6 * len(pairs)), squeeze=False, sharex=True)
@@ -467,6 +474,10 @@ def plot_aligned(results, dt):
             axis.axhline(0, color=MUTED, linewidth=0.6)
             axis.axvline(0, color=MUTED, linewidth=0.6)
             axis.axhline(100 * r["level"], color=RED, linewidth=0.9, linestyle="--")
+            if reference is not None:                   # the data, when these traces are simulated
+                ref = reference["aligned"]
+                ref = ref[(ref["reference_to_response"] == pair) & (ref["response"] == kind)]
+                axis.plot(ref["lag_min"], 100 * ref["change"], color=INK, linewidth=1.0, label="data")
             axis.set_title(f"{pair}: {kind}  ({r['events']:,} reference bursts)", fontsize=8.5)
             style(axis)
             if j == 0:
@@ -504,7 +515,7 @@ def plot_windows(results, dt):
     return figure
 
 
-def plot_ratios(table):
+def plot_ratios(table, reference=None):
     figure, axes = plt.subplots(1, 2, figsize=(13, 7), sharex=True)
     for axis, ((regulator, regulated), part) in zip(axes, table.groupby(["regulator", "regulated"], sort=False)):
         labels = [f"{regulator} {s}  ->  {regulated} {rate}" for rate in [r[0] for r in RATES] for s in SOURCES]
@@ -514,6 +525,12 @@ def plot_ratios(table):
             value, low, high = part[f"ratio_{kind}_cells" if kind == "within" else "ratio_pooled"], part[f"low_{kind}"], part[f"high_{kind}"]
             axis.errorbar(value, y + offset, xerr=[value - low, high - value], fmt="o", color=color, markersize=3.5, elinewidth=1,
                           label="within cells, adjusted for drift (regression)" if kind == "within" else "pooled (includes between-cell)")
+        if reference is not None:                       # the data's simple estimate, when these traces are simulated
+            ref = reference["ratios"].set_index("architecture")
+            keys = [f"{'E' if regulator == 'CCAT1' else 'G'}{s} -> {'G' if regulated == 'MYC' else 'E'} {rate}"
+                    for rate in [r[0] for r in RATES] for s in SOURCES]
+            values = ref.reindex(keys)["ratio_simple"].to_numpy(dtype=float)
+            axis.scatter(values, y, marker="x", color=INK, s=28, zorder=5, label="data (simple estimate)")
         axis.axvline(1, color=INK, linewidth=0.7)
         axis.set_xscale("log")
         axis.set_yticks(y, labels, fontsize=7)
@@ -571,7 +588,7 @@ def plot_cells(stats, correlations):
     return figure
 
 
-def plot_correlations(table, max_lag_min):
+def plot_correlations(table, max_lag_min, reference=None):
     observables = list(dict.fromkeys(table["observable"]))
     figure, axes = plt.subplots(len(observables), 3, figsize=(14, 3.4 * len(observables)), squeeze=False)
     names = {"EG": "CCAT1 x MYC cross-correlation", "EE": "CCAT1 autocorrelation", "GG": "MYC autocorrelation"}
@@ -586,11 +603,16 @@ def plot_correlations(table, max_lag_min):
                                   color=color, alpha=0.15, linewidth=0)
                 axis.plot(part["lag_min"], part[column], color=color, linewidth=1.2, label=label,
                           linestyle="--" if column == "between" else "-")
+            if reference is not None:                   # the data, when these traces are simulated
+                ref = reference["correlations"]
+                ref = ref[(ref["observable"] == observable) & (ref["pair"] == pair) & (ref["lag_min"].abs() <= max_lag_min)]
+                axis.plot(ref["lag_min"], ref["trace_centered"], color=INK, linewidth=1.1, label="data, trace-centred")
+                axis.plot(ref["lag_min"], ref["global"], color=INK, linewidth=1.1, linestyle=":", label="data, global means")
             axis.axhline(0, color=MUTED, linewidth=0.6)
             axis.set_title(f"{names[pair]}, {observable}", fontsize=9)
             axis.set_xlabel("lag (min)" + ("; positive = MYC after CCAT1" if pair == "EG" else ""), fontsize=8)
             style(axis)
-    axes[0, 0].legend(fontsize=7, frameon=False)
+    axes[0, 0].legend(fontsize=6.5, frameon=True, framealpha=0.85, edgecolor="none", loc="upper right")
     figure.suptitle("Multi-tau correlation around each trace's own means and around the global means (± bootstrap SE over cells)",
                     x=0.01, ha="left", fontsize=10, fontweight="bold")
     figure.tight_layout(rect=(0, 0, 1, 0.95))
@@ -610,9 +632,16 @@ def main():
                         help="frames over which the population's time course is smoothed (0 = assume no drift)")
     parser.add_argument("--time-knots", type=int, default=5,
                         help="knots of the smooth time course in the rate-ratio regression (0 = no time course)")
+    parser.add_argument("--reference", help="output folder of this script for the data: drawn in black on every plot "
+                        "(use when the traces are simulated, e.g. exported by 3_run_simulations.jl --export-traces)")
     parser.add_argument("--seed", type=int, default=20261117)
     arguments = parser.parse_args()
     dt, rng = arguments.interval, np.random.default_rng(arguments.seed)
+    reference = None
+    if arguments.reference:
+        folder = Path(arguments.reference)
+        reference = dict(aligned=pd.read_csv(folder / "burst_aligned.csv"), ratios=pd.read_csv(folder / "rate_ratios.csv"),
+                         correlations=pd.read_csv(folder / "correlations.csv"))
     out = Path(arguments.output)
     (out / "plots").mkdir(parents=True, exist_ok=True)
 
@@ -668,7 +697,7 @@ def main():
                 "Fraction of cells ON, in promoter state 3, and burst onsets per hour, in 20-minute bins. A drift means the "
                 "recordings are not stationary: stationary models (the sweep, StochasticGene fits) cannot reproduce it, and it "
                 "shapes the correlations. The analyses below compare against this time course, not a flat average."),
-               ("Burst-aligned averages", plot_aligned(aligned, dt), "burst_aligned",
+               ("Burst-aligned averages", plot_aligned(aligned, dt, reference), "burst_aligned",
                 "Each row: bursts of the first gene are the reference; the response is the second gene. Blue: the response at "
                 "each lag relative to its expected value (the same cell's level times the population's time course, so only "
                 "timing within cells counts, and drifts over the recording do not); for example +20% at +10 min "
@@ -678,7 +707,7 @@ def main():
                ("Average change within every window", plot_windows(aligned, dt), "burst_aligned_windows",
                 "The average change over every window width, so no cutoff has to be chosen: before the reference onset, after it, "
                 "and around it. Where a curve crosses zero shows the time scale of the effect."),
-               ("Model-free fold of every architecture", plot_ratios(ratios), "rate_ratios",
+               ("Model-free fold of every architecture", plot_ratios(ratios, reference), "rate_ratios",
                 "Rate of each transition of the regulated gene while the regulator is in a given state (or has reporters, R), divided "
                 "by the rate while it is not: the fold the sweep's coupling would need. Blue: a Poisson regression of each frame's "
                 "transition on the regulator's condition, with a separate level for every cell and a smooth time course shared by "
@@ -693,7 +722,7 @@ def main():
                ("Between cells", plot_cells(stats, cell_corr), "between_cells",
                 "Per-cell activity of CCAT1 against MYC. A coupling acting from a long-lived state (for example strong inhibition "
                 "from CCAT1 state 2) predicts a clear correlation here; timing effects within cells do not."),
-               ("Correlation within versus between cells", plot_correlations(correlations, arguments.max_lag_min), "correlations",
+               ("Correlation within versus between cells", plot_correlations(correlations, arguments.max_lag_min, reference), "correlations",
                 "Blue: your multi-tau correlation (Coulon average: each trace around its own means, divided by the global means). "
                 "Red: the same lags around the global means. Grey dashed: their difference, the part that comes from differences "
                 "between cells; it is nearly constant across lags.")]

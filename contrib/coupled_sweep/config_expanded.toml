@@ -73,7 +73,7 @@ combine = "mean"                     # combined score of the 3 curves' NRMSEs: "
 
 [report.shape]                       # selection of Mexican-hat-shaped cross-correlations (shape pages of the report)
 center_min = 0.01                    # mean cross-correlation within +/-10 min must be at least this
-flank_max = -0.01                    # and the mean of EACH flank (20 to 60 min on either side) at most this
+flank_max = -0.01                    # and the mean of the two flanks (20 to 60 min on each side) at most this
 nrmse_max = 0.9                      # a second selection also requires NRMSE below this ("" = no second selection)
 nrmse_of = "cross"                   # which NRMSE: "cross" = of the cross-correlation, "combined" = the combined score
                                      # above, "each" = of each of the 3 curves
