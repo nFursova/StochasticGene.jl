@@ -10,6 +10,7 @@ E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit.
 | `2_model_report.py` | Draws the models and parameters as an HTML page, to check before simulating |
 | `3_run_simulations.jl` | Runs the simulations (either simulator) and writes the swarm file |
 | `4_plot_results.py` | Writes the results report (HTML), every plot as PDF and PNG, and the ranking |
+| `5_nearest_simulations.py` | Optional: the simulations of one architecture nearest a given fold or StochasticGene coupling γ (fold = 1 + γ), e.g. the value a direct fit found |
 
 Needs Python 3.11+ with numpy, pandas and matplotlib, Julia, and R for step 0. StochasticGene is only
 needed for `simulator = "stochasticgene"`.
@@ -84,6 +85,16 @@ python3 4_plot_results.py config.toml
 ```
 
 For the extensive sweep, set `mode = "extensive"` and a new `run_dir` in `config.toml`, then repeat from step 2.
+
+**8. (Optional) Compare with a fitted coupling.** The simulations of one architecture nearest a coupling value,
+for example γ = −0.062 from a StochasticGene fit, drawn against the experiment and the uncoupled control:
+
+```bash
+python3 5_nearest_simulations.py config.toml E_to_G__state2__R23 --gamma -0.062
+```
+
+Add `--param fold_EG_R23` when the architecture has more than one fold column, `--n 10` for more simulations,
+`--observable binary` for the ON/OFF state. Writes `nearest_*.csv`, `.pdf` and `.png` into the run folder.
 
 ## What ends up in the run folder
 
