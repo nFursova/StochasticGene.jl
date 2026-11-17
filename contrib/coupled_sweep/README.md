@@ -108,7 +108,9 @@ Writes `relationships/relationships_report.html` and its tables:
 - activity over the recording: drifts break every stationary model
 - burst-aligned averages of each gene around the other's burst onsets, in every window width (no cutoff)
 - the rate of every MYC (and CCAT1) transition while the other gene is in state 1, 2, 3 or has reporters, divided by
-  the rate otherwise: a model-free fold for every architecture, compared within cells and parts of the recording
+  the rate otherwise: a model-free fold for every architecture, from a Poisson regression with a separate level for
+  every cell and a smooth time course shared by all cells (so differences between cells and drifts do not count),
+  plus a check table of the same fold by other methods
 - per-cell activity of the two genes across cells
 - the multi-tau cross-correlation of `fcs_multitau_xcor_final.R` both around each trace's own means (Coulon, as in
   step 0) and around the global means; their difference is the part that comes from differences between cells

@@ -20,13 +20,22 @@ Writes into OUTPUT_FOLDER: relationships_report.html, plots/ (PDF and PNG of eve
    with more reference bursts (between-cell effect). No window cutoff: the windows table and plot give the average
    change within every window from 1 frame to the maximum lag, before, after and around the onset.
 
-2. Rate ratios for every architecture (rate_ratios.csv)
+2. Rate ratios for every architecture (rate_ratios.csv, rate_ratio_methods.csv)
    For every target rate (R12, R21, R23, R32 from the decoded promoter states; Initiate = first reporter position
    becoming occupied while in state 3) and every source condition (other gene in state 1, 2, 3, or with reporters
    = R): the rate while the condition holds divided by the rate while it does not. This is a model-free estimate
-   of that architecture's fold. Within-cell (Mantel-Haenszel over strata = each cell's trace cut into
-   --time-blocks parts: compares times inside the same cell and the same part of the recording) and pooled (all
-   cells together; includes between-cell differences and drifts). 95% intervals from bootstrapping cells.
+   of that architecture's fold.
+   Within cells: a Poisson regression of each frame's transition (0 or 1, for frames at risk) on the source
+   condition, with a separate level for every cell and a smooth time course shared by all cells (restricted cubic
+   spline of the minute in the recording, --time-knots knots, with a weak ridge penalty that keeps it near flat
+   when data are few). exp(coefficient of the condition) = the fold. So
+   cells that are simply more active, and a drift over the recording, do not count. Fitted as a conditional
+   Poisson model (the cell levels are profiled out exactly); 95% interval from cluster-robust (by cell) standard
+   errors. Reported only with at least MIN_EVENTS (10) events in each condition and MIN_CELLS (20) cells that have
+   both conditions and an event. Pooled: all frames together, 95%
+   interval from bootstrapping cells.
+   rate_ratio_methods.csv: the same fold by other methods (pooled; Mantel-Haenszel within whole cells and within
+   blocks of 180 to 30 minutes; the regression with 3 to 7 knots), to check how much the method choice matters.
    Source sets of two states are the reciprocal of the third (state 1+2 = not 3).
 
 3. Between cells versus within cells (cell_statistics.csv, cell_correlations.csv, correlations.csv)
@@ -149,59 +158,154 @@ def burst_aligned(cells, reference, response_gene, K, weights, window):
 # 2. Rate ratios
 # ---------------------------------------------------------------------------
 
-def rate_counts(cells, source, target, blocks):
-    """Per stratum (cell and part of its trace), condition and rate: events and frames at risk, while the source
-    condition holds (1) or not (0)."""
-    rows = []
+def risk_frames(cells, source, target):
+    """Every frame at risk of every target rate: dict rate -> DataFrame cell, frame, event, and the source
+    condition at that frame (columns 1, 2, 3, R). A transition is from frame f to f + 1."""
+    out = {rate: [] for rate, _, _ in RATES}
     for c, cell in enumerate(cells):
-      s_all, t_all = cell[source], cell[target]
-      n_all = len(t_all["state"]) - 1                     # transitions from frame f to f + 1
-      edges = np.linspace(0, n_all, blocks + 1).round().astype(int)
-      for block in range(blocks):
-        start, stop = edges[block], edges[block + 1]
-        if stop <= start:
-            continue
-        s = {key: value[start:stop + 1] for key, value in s_all.items()}
-        t = {key: value[start:stop + 1] for key, value in t_all.items()}
-        n = stop - start
+        s, t = cell[source], cell[target]
+        n = len(t["state"]) - 1
         conditions = {name: (s["state"][:n] == int(name)) if name != "R" else (s["reporters"][:n] > 0) for name in SOURCES}
         for rate, a, b in RATES:
             if a is None:                                 # initiation: state 3 with the first position free
                 risk = (t["state"][:n] == 3) & (t["first"][:n] == 0)
-                event = risk & (t["first"][1:] == 1)
+                event = t["first"][1:] == 1
             else:
                 risk = t["state"][:n] == a
-                event = risk & (t["state"][1:] == b)
-            for name, holds in conditions.items():
-                rows.append(dict(cell=c, block=block, rate=rate, source=name, k1=(event & holds).sum(), T1=(risk & holds).sum(),
-                                 k0=(event & ~holds).sum(), T0=(risk & ~holds).sum()))
-    return pd.DataFrame(rows)
+                event = t["state"][1:] == b
+            frames = np.flatnonzero(risk)
+            out[rate].append(pd.DataFrame(dict(cell=c, frame=frames, event=event[frames].astype(float),
+                                               **{name: holds[frames] for name, holds in conditions.items()})))
+    return {rate: pd.concat(parts, ignore_index=True) for rate, parts in out.items()}
 
 
-def rate_ratios(cells, source, target, weights, dt, blocks):
-    counts = rate_counts(cells, source, target, blocks)
-    out = []
-    for (rate, name), part in counts.groupby(["rate", "source"], sort=False):
-        part = part.sort_values(["cell", "block"])
-        k1, T1, k0, T0 = (part[c].to_numpy(dtype=float) for c in ("k1", "T1", "k0", "T0"))
-        T = np.where(T1 + T0 > 0, T1 + T0, 1)
-        member = part["cell"].to_numpy()
-        W = weights[:, member]                            # a stratum is drawn whenever its cell is
-        def mh(w):
-            return (w @ (k1 * T0 / T)) / (w @ (k0 * T1 / T))
-        def pooled(w):
-            return ((w @ k1) / (w @ T1)) / ((w @ k0) / (w @ T0))
-        with np.errstate(divide="ignore", invalid="ignore"):
-            one = np.ones(len(k1))
-            boot_mh, boot_pooled = mh(W), pooled(W)
-            out.append(dict(regulator=GENES[source], regulated=GENES[target], source_state=name, rate=rate,
-                            architecture=f"{source}{name} -> {target} {rate}",
-                            ratio_within_cells=mh(one), low_within=interval(boot_mh)[0], high_within=interval(boot_mh)[1],
-                            ratio_pooled=pooled(one), low_pooled=interval(boot_pooled)[0], high_pooled=interval(boot_pooled)[1],
-                            rate_when_on_per_min=k1.sum() / T1.sum() / dt, rate_when_off_per_min=k0.sum() / T0.sum() / dt,
-                            events_on=int(k1.sum()), events_off=int(k0.sum()),
-                            cells_informative=int(len(set(member[(T1 > 0) & (T0 > 0)])))))
-    return pd.DataFrame(out)
+def spline_basis(x, knots):
+    """Restricted (natural) cubic spline of x (Harrell's form): x and knots - 2 non-linear columns, scaled to ~1."""
+    t = np.quantile(x, np.linspace(0.05, 0.95, knots)) if knots >= 3 else np.array([])
+    columns = [(x - x.mean()) / (x.std() or 1)]
+    plus = lambda v: np.maximum(v, 0) ** 3
+    for j in range(knots - 2):
+        column = (plus(x - t[j]) - plus(x - t[-2]) * (t[-1] - t[j]) / (t[-1] - t[-2])
+                  + plus(x - t[-1]) * (t[-2] - t[j]) / (t[-1] - t[-2])) / (t[-1] - t[0]) ** 2
+        columns.append(column / (column.std() or 1))
+    return np.column_stack(columns)
+
+
+MIN_EVENTS = 10            # a fold is reported only with at least this many events in each condition
+MIN_CELLS = 20             # and this many cells with both conditions and an event (the interval is by cell)
+TIME_PENALTY = 1.0         # ridge penalty on the time-course coefficients (columns scaled to SD 1); not on the fold
+
+
+def conditional_poisson(cell, y, X, penalty=None):
+    """Poisson regression with one level per cell, profiled out exactly (conditional / multinomial likelihood).
+    `penalty`: ridge weight per column (keeps a time course near flat when data are few).
+    Returns coefficients, cluster-robust covariance (by cell), and whether it converged."""
+    beta = np.zeros(X.shape[1])
+    P = np.diag(np.zeros(X.shape[1]) if penalty is None else penalty)
+    keep = np.bincount(cell, y)[cell] > 0                 # cells without events carry no information
+    cell, y, X = cell[keep], y[keep], X[keep]
+    if len(y) == 0:
+        return beta * np.nan, None, False
+    cell = np.unique(cell, return_inverse=True)[1]
+    Y = np.bincount(cell, y)
+
+    def fit(b):
+        raw = np.exp(np.clip(X @ b, -50, 50))
+        S = np.bincount(cell, raw)
+        mu = raw * (Y / S)[cell]
+        return mu, (y * (X @ b)).sum() - (Y * np.log(S)).sum() - 0.5 * b @ P @ b
+
+    mu, loglik = fit(beta)
+    for _ in range(100):
+        m = np.stack([np.bincount(cell, mu * X[:, k]) for k in range(X.shape[1])], axis=1)   # per cell: sum mu x
+        H = (X * mu[:, None]).T @ X - (m / Y[:, None]).T @ m + P
+        g = X.T @ (y - mu) - P @ beta
+        try:
+            step = np.linalg.solve(H, g)
+        except np.linalg.LinAlgError:
+            return beta * np.nan, None, False
+        size = 1.0
+        while size > 1e-6:
+            mu_new, loglik_new = fit(beta + size * step)
+            if loglik_new >= loglik - 1e-10:
+                break
+            size /= 2
+        beta, mu, loglik = beta + size * step, mu_new, loglik_new
+        if np.max(np.abs(size * step)) < 1e-8:
+            break
+    else:
+        return beta, None, False
+    m = np.stack([np.bincount(cell, mu * X[:, k]) for k in range(X.shape[1])], axis=1)
+    H = (X * mu[:, None]).T @ X - (m / Y[:, None]).T @ m + P
+    scores = np.stack([np.bincount(cell, (y - mu) * X[:, k], minlength=len(Y)) for k in range(X.shape[1])], axis=1)
+    G = len(Y)
+    inverse = np.linalg.inv(H)
+    return beta, inverse @ (scores.T @ scores) @ inverse * G / max(G - 1, 1), True
+
+
+def regression_fold(table, name, knots, dt):
+    """Fold of condition `name` (within cells, adjusted for a shared smooth time course) and its 95% interval."""
+    holds = table[name].to_numpy(dtype=float)
+    k1, k0 = table["event"][holds == 1].sum(), table["event"][holds == 0].sum()
+    if min(k1, k0) < MIN_EVENTS:
+        return np.nan, np.nan, np.nan, f"too few events ({int(k1)} and {int(k0)})"
+    per_cell = pd.DataFrame(dict(cell=table["cell"], on=holds, off=1 - holds, event=table["event"])).groupby("cell").sum()
+    informative = int(((per_cell["on"] > 0) & (per_cell["off"] > 0) & (per_cell["event"] > 0)).sum())
+    if informative < MIN_CELLS:
+        return np.nan, np.nan, np.nan, f"too few informative cells ({informative})"
+    X = np.column_stack([holds, spline_basis(table["frame"].to_numpy(dtype=float) * dt, knots)]) if knots >= 2 else holds[:, None]
+    penalty = np.r_[0.0, np.full(X.shape[1] - 1, TIME_PENALTY)]
+    beta, covariance, converged = conditional_poisson(table["cell"].to_numpy(), table["event"].to_numpy(dtype=float), X, penalty)
+    if covariance is None or not np.isfinite(beta[0]):
+        return np.nan, np.nan, np.nan, "did not converge"
+    se = np.sqrt(covariance[0, 0])
+    return np.exp(beta[0]), np.exp(beta[0] - 1.96 * se), np.exp(beta[0] + 1.96 * se), ""
+
+
+def mantel_haenszel(table, name, minutes, dt):
+    """Mantel-Haenszel rate ratio over strata = cells cut into blocks of `minutes` (None = whole cells)."""
+    block = np.zeros(len(table), dtype=int) if minutes is None else (table["frame"].to_numpy() * dt // minutes).astype(int)
+    strata = pd.DataFrame(dict(cell=table["cell"], block=block, holds=table[name].astype(bool), event=table["event"]))
+    counts = strata.groupby(["cell", "block", "holds"])["event"].agg(["sum", "count"]).unstack("holds", fill_value=0)
+    if True not in counts["sum"] or False not in counts["sum"]:
+        return np.nan
+    k1, T1, k0, T0 = counts["sum"][True], counts["count"][True], counts["sum"][False], counts["count"][False]
+    T = T1 + T0
+    return (k1 * T0 / T).sum() / (k0 * T1 / T).sum()
+
+
+def rate_ratios(cells, source, target, weights, dt, knots):
+    """Rate ratios of every source condition and target rate: the regression (main), pooled with a bootstrap
+    interval, and the other methods for the check table."""
+    frames = risk_frames(cells, source, target)
+    out, methods = [], []
+    for rate, _, _ in RATES:
+        table = frames[rate]
+        for name in SOURCES:
+            holds = table[name].to_numpy(dtype=bool)
+            event = table["event"].to_numpy()
+            k1c = np.bincount(table["cell"], event * holds, minlength=len(cells))
+            T1c = np.bincount(table["cell"], holds, minlength=len(cells))
+            k0c = np.bincount(table["cell"], event * ~holds, minlength=len(cells))
+            T0c = np.bincount(table["cell"], ~holds, minlength=len(cells))
+            with np.errstate(divide="ignore", invalid="ignore"):
+                pooled = lambda w: ((w @ k1c) / (w @ T1c)) / ((w @ k0c) / (w @ T0c))
+                boot = pooled(weights)
+                fold, low, high, note = regression_fold(table, name, knots, dt)
+                out.append(dict(regulator=GENES[source], regulated=GENES[target], source_state=name, rate=rate,
+                                architecture=f"{source}{name} -> {target} {rate}",
+                                ratio_within_cells=fold, low_within=low, high_within=high, note=note,
+                                ratio_pooled=pooled(np.ones(len(cells))), low_pooled=interval(boot)[0], high_pooled=interval(boot)[1],
+                                rate_when_on_per_min=k1c.sum() / T1c.sum() / dt, rate_when_off_per_min=k0c.sum() / T0c.sum() / dt,
+                                events_on=int(k1c.sum()), events_off=int(k0c.sum()),
+                                cells_informative=int(((T1c > 0) & (T0c > 0) & (k1c + k0c > 0)).sum())))
+                row = dict(architecture=f"{source}{name} -> {target} {rate}", pooled=pooled(np.ones(len(cells))),
+                           **{"MH whole cells": mantel_haenszel(table, name, None, dt)},
+                           **{f"MH {m} min": mantel_haenszel(table, name, m, dt) for m in (180, 120, 90, 60, 45, 30)},
+                           **{f"regression {k} knots": regression_fold(table, name, k, dt)[0] for k in (0, 3, 4, 5, 7)})
+                methods.append(row)
+    return pd.DataFrame(out), pd.DataFrame(methods)
+
 
 # ---------------------------------------------------------------------------
 # 3. Between cells: per-cell statistics and the multi-tau correlation, trace-centred and global
@@ -409,7 +513,7 @@ def plot_ratios(table):
         for offset, kind, color in ((0.15, "within", BLUE), (-0.15, "pooled", MUTED)):
             value, low, high = part[f"ratio_{kind}_cells" if kind == "within" else "ratio_pooled"], part[f"low_{kind}"], part[f"high_{kind}"]
             axis.errorbar(value, y + offset, xerr=[value - low, high - value], fmt="o", color=color, markersize=3.5, elinewidth=1,
-                          label="within cells" if kind == "within" else "pooled (includes between-cell)")
+                          label="within cells, adjusted for drift (regression)" if kind == "within" else "pooled (includes between-cell)")
         axis.axvline(1, color=INK, linewidth=0.7)
         axis.set_xscale("log")
         axis.set_yticks(y, labels, fontsize=7)
@@ -422,6 +526,23 @@ def plot_ratios(table):
     figure.suptitle("Model-free fold of every architecture. 1 = no effect; source R = the regulator has reporters",
                     x=0.01, ha="left", fontsize=10, fontweight="bold")
     figure.tight_layout(rect=(0, 0, 1, 0.96))
+    return figure
+
+
+def plot_methods(methods):
+    """The fold of every architecture by every method: log2 colour, numbers in the cells."""
+    table = methods.set_index("architecture").rename(columns={"regression 0 knots": "regression, no time course"})
+    values = np.log2(table.to_numpy(dtype=float))
+    figure, axis = plt.subplots(figsize=(13, 0.22 * len(table) + 2))
+    image = axis.imshow(np.clip(values, -2, 2), cmap="RdBu_r", vmin=-2, vmax=2, aspect="auto")
+    axis.set_xticks(range(table.shape[1]), table.columns, rotation=35, ha="right", fontsize=7)
+    axis.set_yticks(range(table.shape[0]), table.index, fontsize=6.5)
+    for (i, j), value in np.ndenumerate(table.to_numpy(dtype=float)):
+        axis.text(j, i, "" if not np.isfinite(value) else f"{value:.2f}", ha="center", va="center", fontsize=5.5)
+    figure.colorbar(image, ax=axis, label="log2 fold (clipped at 1/4 and 4)", shrink=0.6)
+    figure.suptitle("The fold of every architecture by each method (check). Stable along a row = the choice of method does not matter",
+                    x=0.01, ha="left", fontsize=10, fontweight="bold")
+    figure.tight_layout(rect=(0, 0, 1, 0.98))
     return figure
 
 
@@ -487,7 +608,8 @@ def main():
     parser.add_argument("--epsilon", type=float, default=1e-7, help="added to traces before correlating, as in step 0")
     parser.add_argument("--trend-window", type=int, default=25,
                         help="frames over which the population's time course is smoothed (0 = assume no drift)")
-    parser.add_argument("--time-blocks", type=int, default=4, help="parts of each trace that rate ratios are compared within")
+    parser.add_argument("--time-knots", type=int, default=5,
+                        help="knots of the smooth time course in the rate-ratio regression (0 = no time course)")
     parser.add_argument("--seed", type=int, default=20261117)
     arguments = parser.parse_args()
     dt, rng = arguments.interval, np.random.default_rng(arguments.seed)
@@ -517,8 +639,10 @@ def main():
     pd.concat(windows).to_csv(out / "burst_aligned_windows.csv", index=False)
 
     # 2. rate ratios
-    ratios = pd.concat([rate_ratios(cells, a, b, weights, dt, arguments.time_blocks) for a, b in (("E", "G"), ("G", "E"))])
+    pairs = [rate_ratios(cells, a, b, weights, dt, arguments.time_knots) for a, b in (("E", "G"), ("G", "E"))]
+    ratios, methods = pd.concat([p[0] for p in pairs]), pd.concat([p[1] for p in pairs])
     ratios.to_csv(out / "rate_ratios.csv", index=False)
+    methods.to_csv(out / "rate_ratio_methods.csv", index=False)
 
     # 3. between cells
     stats = cell_statistics(cells, dt)
@@ -556,10 +680,16 @@ def main():
                 "and around it. Where a curve crosses zero shows the time scale of the effect."),
                ("Model-free fold of every architecture", plot_ratios(ratios), "rate_ratios",
                 "Rate of each transition of the regulated gene while the regulator is in a given state (or has reporters, R), divided "
-                "by the rate while it is not: the fold the sweep's coupling would need. Blue: compared within each cell "
-                "and within the same part of the recording (Mantel-Haenszel), which removes cells that are simply more active and "
-                "drifts over time. Grey: all cells and times pooled. "
-                "States come from Viterbi decoding with the uncoupled model; decoding errors pull ratios towards 1."),
+                "by the rate while it is not: the fold the sweep's coupling would need. Blue: a Poisson regression of each frame's "
+                "transition on the regulator's condition, with a separate level for every cell and a smooth time course shared by "
+                "all cells, so cells that are simply more active and drifts over the recording do not count (95% interval: "
+                "cluster-robust by cell). Grey: all frames pooled (95% interval: bootstrap over cells). Assumptions: decoded states "
+                "are taken as true (decoding errors pull ratios towards 1, so a measured 0.8 can hide a stronger true effect); the "
+                "effect is instantaneous; transitions faster than a frame are missed; one fold for all cells and times."),
+               ("Check: the fold by every method", plot_methods(methods), "rate_ratio_methods",
+                "The same folds by other methods: pooled; Mantel-Haenszel within whole cells and within blocks of 180 to 30 minutes; "
+                "the regression without a time course and with 3 to 7 knots. Where a row changes a lot, the result depends on the "
+                "method (typically too few events or switches of the regulator), and should not be trusted."),
                ("Between cells", plot_cells(stats, cell_corr), "between_cells",
                 "Per-cell activity of CCAT1 against MYC. A coupling acting from a long-lived state (for example strong inhibition "
                 "from CCAT1 state 2) predicts a clear correlation here; timing effects within cells do not."),
@@ -582,7 +712,7 @@ def main():
 img{{max-width:100%;border:1px solid #e1e0d9}}table{{border-collapse:collapse;font-size:13px}}td,th{{border-bottom:1px solid #e1e0d9;padding:3px 8px;text-align:right}}
 p{{color:#52514e}}</style></head><body><h1>CCAT1 and MYC in decoded traces</h1>
 <p>{len(cells)} cells, {dt:.3g} min per frame, {arguments.bootstrap} bootstrap replicates over cells. Inputs: {html.escape(Path(arguments.ccat1).name)},
-{html.escape(Path(arguments.myc).name)}. Tables: burst_aligned.csv, burst_aligned_windows.csv, rate_ratios.csv, cell_statistics.csv,
+{html.escape(Path(arguments.myc).name)}. Tables: burst_aligned.csv, burst_aligned_windows.csv, rate_ratios.csv, rate_ratio_methods.csv, cell_statistics.csv,
 cell_correlations.csv, correlations.csv.</p>
 <h2>Architectures with the largest within-cell effect</h2>{table}
 {''.join(cards)}</body></html>"""
