@@ -11,6 +11,7 @@ E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit.
 | `3_run_simulations.jl` | Runs the simulations (either simulator) and writes the swarm file |
 | `4_plot_results.py` | Writes the results report (HTML), every plot as PDF and PNG, and the ranking |
 | `5_nearest_simulations.py` | Optional: the simulations of one architecture nearest a given fold or StochasticGene coupling γ (fold = 1 + γ), e.g. the value a direct fit found |
+| `6_trace_relationships.py` | Optional: how CCAT1 and MYC relate in decoded traces (burst-aligned averages, model-free fold of every architecture, between- vs within-cell correlation), no model fit |
 
 Needs Python 3.11+ with numpy, pandas and matplotlib, Julia, and R for step 0. StochasticGene is only
 needed for `simulator = "stochasticgene"`.
@@ -95,6 +96,25 @@ python3 5_nearest_simulations.py config.toml E_to_G__state2__R23 --gamma -0.062
 
 Add `--param fold_EG_R23` when the architecture has more than one fold column, `--n 10` for more simulations,
 `--observable binary` for the ON/OFF state. Writes `nearest_*.csv`, `.pdf` and `.png` into the run folder.
+
+**9. (Optional) Relationships in the decoded traces, without a coupled fit.** From the two `predictedtraces_*.csv`
+files of the uncoupled fits:
+
+```bash
+python3 6_trace_relationships.py CCAT1_predictedtraces.csv MYC_predictedtraces.csv relationships
+```
+
+Writes `relationships/relationships_report.html` and its tables:
+- activity over the recording: drifts break every stationary model
+- burst-aligned averages of each gene around the other's burst onsets, in every window width (no cutoff)
+- the rate of every MYC (and CCAT1) transition while the other gene is in state 1, 2, 3 or has reporters, divided by
+  the rate otherwise: a model-free fold for every architecture, compared within cells and parts of the recording
+- per-cell activity of the two genes across cells
+- the multi-tau cross-correlation of `fcs_multitau_xcor_final.R` both around each trace's own means (Coulon, as in
+  step 0) and around the global means; their difference is the part that comes from differences between cells
+
+The results report (step 7) also shows, for every single-connection architecture, its cross-correlation at every
+fold tested, coloured from inhibition (blue) to activation (red), in a grid of source states by regulated rates.
 
 ## What ends up in the run folder
 

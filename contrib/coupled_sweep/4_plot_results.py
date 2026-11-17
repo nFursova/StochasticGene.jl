@@ -22,6 +22,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.collections
 from matplotlib.colors import LinearSegmentedColormap
 
 PLOT_MAX_LAG_MIN = 120      # lag range shown in every plot
@@ -753,6 +754,77 @@ def shape_map(table, observable, hat_experiment):
     return figure
 
 
+FOLD_COLUMNS = 9          # fold-response grids: rate sets per page
+FOLD_ROWS = 4             # source states per page
+
+
+def fold_response_pages(table, curves, experiment, observable, group):
+    """Single-connection models (E_to_G or G_to_E): one panel per source state (rows) and regulated-rate set
+    (columns); every simulation's cross-correlation, coloured by its fold (blue = inhibition, red = activation;
+    with one fold per regulated rate, their geometric mean), against the experiment (black).
+    Returns [(figure, page title)]."""
+    edge = "EG" if group == "E_to_G" else "GE"
+    part = table[(table["group"] == group) & (table["control"].astype(str) != "yes")] if "control" in table else table[table["group"] == group]
+    part = part[~part["model_id"].astype(str).str.endswith("gamma0")]
+    if part.empty:
+        return []
+    folds = [c for c in table.columns if c == f"fold_{edge}" or c.startswith(f"fold_{edge}_")]
+    values = part[folds].apply(pd.to_numeric, errors="coerce")
+    fold = np.exp(np.log(values.where(values > 0)).mean(axis=1, skipna=True)).to_numpy()
+    lag_rows, lag_frames, lags = curves.rows(observable, "EG")
+    target, _ = experiment_curve(experiment, observable, "EG", lag_frames)
+    simulated = mean_curves(curves, part, lag_rows)
+    finite = np.isfinite(simulated)
+    low, high = np.nanpercentile(simulated[finite], [1, 99]) if finite.any() else (-1, 1)
+    low, high = min(low, np.nanmin(target)), max(high, np.nanmax(target))
+    span = np.nanmax(np.abs(np.log10(fold[np.isfinite(fold)]))) if np.isfinite(fold).any() else 1
+    norm = matplotlib.colors.TwoSlopeNorm(0, -max(span, 0.1), max(span, 0.1))
+    colours = plt.get_cmap("RdBu_r")
+    states = sorted(part[f"{edge}_state"].astype(str).unique(), key=lambda v: (v == "R", v))
+    rate_sets = list(dict.fromkeys(part[f"{edge}_rates"].astype(str)))
+    pages = []
+    for r0 in range(0, len(states), FOLD_ROWS):
+        for c0 in range(0, len(rate_sets), FOLD_COLUMNS):
+            rows, columns = states[r0:r0 + FOLD_ROWS], rate_sets[c0:c0 + FOLD_COLUMNS]
+            figure, axes = plt.subplots(len(rows), len(columns), figsize=(11.69, 1.75 * len(rows) + 1.4), squeeze=False,
+                                        sharex=True, sharey=True)
+            for i, state in enumerate(rows):
+                for j, rates in enumerate(columns):
+                    axis = axes[i, j]
+                    inside = np.flatnonzero((part[f"{edge}_state"].astype(str).to_numpy() == state) &
+                                            (part[f"{edge}_rates"].astype(str).to_numpy() == rates))
+                    order = inside[np.argsort(-np.abs(np.log10(fold[inside])))[::-1]]   # strongest folds drawn last
+                    segments = [np.column_stack([lags, simulated[k]]) for k in order]
+                    axis.add_collection(matplotlib.collections.LineCollection(
+                        segments, colors=colours(norm(np.log10(fold[order]))), linewidths=0.6, alpha=0.7))
+                    axis.plot(lags, target, color=INK, linewidth=1.3)
+                    axis.axhline(0, color=MUTED, linewidth=0.4)
+                    axis.axvline(0, color=MUTED, linewidth=0.4)
+                    axis.set_xlim(lags[0], lags[-1])
+                    axis.set_ylim(low, high)
+                    axis.tick_params(labelsize=5.5, colors=MUTED, labelcolor=INK, length=2)
+                    for side in ("top", "right"):
+                        axis.spines[side].set_visible(False)
+                    if i == 0:
+                        axis.set_title(rates.replace("+", "+\n"), fontsize=6.5)
+                    if j == 0:
+                        axis.set_ylabel(f"{edge[0]} state {state}", fontsize=7.5)
+                    axis.text(0.98, 0.95, f"n={len(inside)}", transform=axis.transAxes, ha="right", va="top", fontsize=5, color=MUTED)
+            for axis in axes[-1]:
+                axis.set_xlabel("lag (min)", fontsize=6.5)
+            figure.subplots_adjust(left=0.06, right=0.9, top=1 - 0.75 / figure.get_size_inches()[1], bottom=0.45 / figure.get_size_inches()[1],
+                                   wspace=0.12, hspace=0.25)
+            bar = figure.colorbar(matplotlib.cm.ScalarMappable(norm=norm, cmap=colours),
+                                  cax=figure.add_axes([0.92, 0.2, 0.012, 0.6]))
+            bar.set_label(f"log10 fold ({edge[0]} regulates {edge[1]}): blue inhibits, red activates", fontsize=7)
+            bar.ax.tick_params(labelsize=6)
+            title = (f"{group}, {'reporter count' if observable == 'reporter' else 'ON/OFF state'}: cross-correlation against fold. "
+                     f"Rows = source state, columns = regulated rates; black = experiment")
+            figure.suptitle(title, x=0.01, ha="left", fontsize=9, fontweight="bold")
+            pages.append((figure, title))
+    return pages
+
+
 def metric_by_group(table, column, title, scale, reference=None):
     """One metric per model group: a violin, every simulation as a faint point, and the group median
     (black bar, value at the right). reference: the experiment's value, drawn as a dashed line."""
@@ -1237,6 +1309,16 @@ def main():
              f"Shading: centre ≥ {HAT_CENTER_THRESHOLD:g}, mean of the two flanks ≤ {HAT_FLANK_THRESHOLD:g}. The filtered heatmap "
              "also requires EACH flank to pass; therefore not every point inside the shaded area necessarily qualifies. "
              "X = experiment; diamond = uncoupled. Up to 50,000 points per scatter layer are drawn; selection uses all points.")
+
+    for observable in [o for o in ("reporter", "binary") if o in observables]:
+        for group in ("E_to_G", "G_to_E"):
+            pages = fold_response_pages(table, curves, experiment, observable, group)
+            for page, (figure, title) in enumerate(pages, start=1):
+                save("How single-connection models respond to their fold", figure, f"fold_response_{group}_{observable}_{page:02d}",
+                     title + (f" · page {page}/{len(pages)}" if len(pages) > 1 else ""),
+                     "Every simulation of each architecture, coloured by its fold: shows which source state and regulated rates "
+                     "can make the experimental shape, and whether it needs inhibition or activation and how strong.",
+                     key=f"fold_response_{group}_{observable}", page=page)
 
     for column, title, scale in METRICS:
         reference = hat_experiment[column.split("_")[1]]["hat"] if column.startswith("hat") else None
