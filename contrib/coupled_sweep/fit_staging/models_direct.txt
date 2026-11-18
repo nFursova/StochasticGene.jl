@@ -1,0 +1,14 @@
+# For stage_coupled_reciprocal.jl (SG_MODELFILE). Candidates from the sweep; every gamma free, starting at 0.
+# <name> = <arms> @ free   (arm = <source unit><states>:<target rates of the other unit>; 1 R12, 2 R21, 3 R23, 4 R32, 5 Initiate)
+# CCAT1 (enhancer) regulates MYC (gene)
+EtoG-e3R-R21          = e3R:2@free
+EtoG-e2-R12R23        = e2:1,3@free
+EtoG-e2-R12R23Init    = e2:1,3,5@free
+EtoG-e3-R21R32        = e3:2,4@free
+# MYC (gene) regulates CCAT1 (enhancer)
+GtoE-g1-R12           = g1:1@free
+GtoE-g2-Init          = g2:5@free
+GtoE-g2-R23           = g2:3@free
+GtoE-g2-R12R23Init    = g2:1,3,5@free
+# both directions
+Recip-e3R21-g3R21     = e3:2+g3:2@free
