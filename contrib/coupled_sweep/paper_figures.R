@@ -16,8 +16,13 @@
 #   e.g. Rscript paper_figures.R runs/semi_extensive_insert_steps 11 data/experimental.csv \
 #            data/predictedtraces_..._enhancer.csv data/predictedtraces_..._gene.csv figures_insert11
 #
-# INSERT: 11, 13 or 33 reads RUN_DIR/results/insert<INSERT>; "" reads RUN_DIR/results (runs without insert_steps).
-# Needs R with ggplot2. Writes PDF and PNG figures and CSV tables into OUTPUT_FOLDER.
+# INSERT: 11, 13 or 33 reads RUN_DIR/results/insert<INSERT>; none (or "" or -) reads RUN_DIR/results: runs made
+# without insert_steps, e.g. earlier runs. RUN_DIR: the run_dir of a regular config (simulations.csv), or
+# <run_root>/<profile> of an expanded config (expanded_models.csv and expanded_simulations.csv, binary .f32 curves).
+# Needs R with ggplot2 (data.table, if installed, makes reading large runs faster).
+# Writes PDF and PNG figures and CSV tables into OUTPUT_FOLDER. Large runs: every simulation's centre and flanks are
+# computed while reading, but curves are kept only for the hat-shaped ones; the shape map draws at most
+# MAX_POINTS points per model type (its counts use all).
 
 suppressPackageStartupMessages(library(ggplot2))
 
@@ -38,11 +43,12 @@ NRMSE_CUTOFF  <- NA             # ... or, if a number, every architecture with N
 HEATMAP_LAG   <- 120            # heatmap lag range, minutes
 TOP_CURVES    <- 20             # figure 6: this many best architectures
 INSERT_COLOURS <- c(`11` = "#2a78d6", `13` = "#eb6834", `33` = "#1baf7a")   # figure 6: insert-step variants
+MAX_POINTS    <- 100000         # figure 1: at most this many points drawn per model type
 SEED          <- 20261118
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) != 6) stop("usage: Rscript paper_figures.R RUN_DIR INSERT EXPERIMENTAL_CSV CCAT1_PREDICTED MYC_PREDICTED OUTPUT_FOLDER")
-run_dir <- args[1]; insert <- args[2]; out <- args[6]
+run_dir <- args[1]; insert <- if (args[2] %in% c("", "none", "-")) "" else args[2]; out <- args[6]
 results <- file.path(run_dir, "results", if (nzchar(insert)) paste0("insert", insert) else "")
 dir.create(out, recursive = TRUE, showWarnings = FALSE)
 set.seed(SEED)
@@ -58,49 +64,107 @@ save_plot <- function(plot, name, width, height) {
 }
 
 # ---------------------------------------------------------------------------
-# Read the run: simulation list, metrics and mean curves (the newest file wins for a simulation in several)
+# Reading (regular and expanded runs; the newest results file wins for a simulation in several)
 # ---------------------------------------------------------------------------
-sims <- read.csv(file.path(run_dir, "simulations.csv"), colClasses = "character", check.names = FALSE)
-newest_first <- function(pattern) {
-  files <- list.files(results, pattern = pattern, full.names = TRUE)
-  if (!length(files)) stop("no ", pattern, " files in ", results)
+# Columns `keep` (a function of the header) of a CSV file, as text or as read.
+read_cols <- function(path, keep = function(header) rep(TRUE, length(header)), text = FALSE) {
+  header <- gsub('"', "", strsplit(readLines(path, n = 1), ",", fixed = TRUE)[[1]])
+  wanted <- header[keep(header)]
+  if (requireNamespace("data.table", quietly = TRUE)) {
+    d <- data.table::fread(path, select = wanted, colClasses = if (text) "character" else NULL, showProgress = FALSE,
+                           na.strings = c("", "NA"))
+    return(as.data.frame(d))
+  }
+  classes <- ifelse(header %in% wanted, if (text) "character" else NA, "NULL")
+  read.csv(path, colClasses = classes, check.names = FALSE)
+}
+# The simulation list with the columns of a regular simulations.csv: sim_id, model_id, group, <edge>_state,
+# <edge>_rates (edge EG, GE, HE, HG) and the folds and hidden rates.
+read_simulations <- function(run_dir) {
+  if (file.exists(file.path(run_dir, "simulations.csv")))
+    return(read_cols(file.path(run_dir, "simulations.csv"), text = TRUE))
+  models <- read_cols(file.path(run_dir, "expanded_models.csv"), text = TRUE)
+  points <- read_cols(file.path(run_dir, "expanded_simulations.csv"), text = TRUE,
+                      keep = function(h) h %in% c("sim_id", "architecture_id") | grepl("^fold_|^h[0-9]{2}$", h))
+  at <- match(points$architecture_id, models$architecture_id)
+  sims <- data.frame(sim_id = points$sim_id, model_id = points$architecture_id, group = models$group[at])
+  for (edge in c("EG", "GE", "HE", "HG")) {
+    kind <- models[[paste0(edge, "_source_kind")]][at]
+    sims[[paste0(edge, "_state")]] <- ifelse(kind == "reporter_count", "R", models[[paste0(edge, "_states")]][at])
+    sims[[paste0(edge, "_rates")]] <- models[[paste0(edge, "_rates")]][at]
+  }
+  cbind(sims, points[, grepl("^fold_|^h[0-9]{2}$", names(points)), drop = FALSE])
+}
+# The reporter curves of one results file: sim_id, pair, lag_min, mean, se (CSV, or binary .f32 of expanded runs).
+read_curve_file <- function(path) {
+  if (grepl("\\.f32$", path)) {
+    layout <- read.csv(file.path(dirname(path), "curve_layout.csv"))
+    bounds <- as.integer(strsplit(sub("^curves_([0-9]+)-([0-9]+)\\.f32$", "\\1 \\2", basename(path)), " ")[[1]])
+    n <- bounds[2] - bounds[1] + 1
+    values <- readBin(path, "numeric", n = 2 * n * nrow(layout), size = 4)
+    rows <- which(layout$observable == "reporter")
+    means <- matrix(values[c(TRUE, FALSE)], nrow = nrow(layout))[rows, , drop = FALSE]
+    ses <- matrix(values[c(FALSE, TRUE)], nrow = nrow(layout))[rows, , drop = FALSE]
+    return(data.frame(sim_id = rep(bounds[1]:bounds[2], each = length(rows)), pair = layout$pair[rows],
+                      lag_min = layout$lag_min[rows], mean = as.vector(means), se = as.vector(ses)))
+  }
+  d <- read_cols(path, keep = function(h) !grepl("^rep", h))
+  d[d$observable == "reporter", c("sim_id", "pair", "lag_min", "mean", "se")]
+}
+curve_files <- function(folder) {                       # newest first
+  files <- list.files(folder, pattern = "^curves_[0-9]+-[0-9]+\\.(csv|f32)$", full.names = TRUE)
   files[order(file.mtime(files), decreasing = TRUE)]
 }
-metrics <- do.call(rbind, lapply(newest_first("^metrics_.*\\.csv$"), read.csv))
-metrics <- metrics[!duplicated(metrics$sim_id), ]
-read_curves <- function(path) {                     # keep the mean, drop the replicate columns
-  header <- names(read.csv(path, nrows = 1))
-  classes <- ifelse(grepl("^rep", header), "NULL", NA)
-  part <- read.csv(path, colClasses = classes)
-  part[part$observable == "reporter", c("sim_id", "pair", "lag_min", "mean")]
+hat <- function(lag, value) c(center = mean(value[abs(lag) <= CENTER_MIN + 1e-9], na.rm = TRUE),
+                              flanks = mean(value[abs(lag) >= FLANKS_MIN[1] & abs(lag) <= FLANKS_MIN[2]], na.rm = TRUE))
+# Centre and flanks of every simulation, per results file; keeps the cross-correlation only of hat-shaped ones.
+read_shapes <- function(folder) {
+  files <- curve_files(folder)
+  if (!length(files)) stop("no curves files in ", folder)
+  seen <- integer(0); shapes <- list(); kept <- list()
+  for (f in files) {
+    d <- read_curve_file(f)
+    d <- d[d$pair == "EG" & !(d$sim_id %in% seen), ]
+    if (!nrow(d)) next
+    d$lag_min <- round(d$lag_min, 2)
+    ok <- is.finite(d$mean)
+    in_center <- ok & abs(d$lag_min) <= CENTER_MIN + 1e-9
+    in_flanks <- ok & abs(d$lag_min) >= FLANKS_MIN[1] & abs(d$lag_min) <= FLANKS_MIN[2]
+    by <- factor(d$sim_id)
+    shape <- data.frame(sim_id = as.integer(levels(by)),
+                        center = tapply(ifelse(in_center, d$mean, 0), by, sum) / tapply(in_center, by, sum),
+                        flanks = tapply(ifelse(in_flanks, d$mean, 0), by, sum) / tapply(in_flanks, by, sum))
+    shape$hat_shape <- shape$center >= CENTER_AT_LEAST & shape$flanks <= FLANKS_AT_MOST
+    shapes[[length(shapes) + 1]] <- shape
+    kept[[length(kept) + 1]] <- d[d$sim_id %in% shape$sim_id[which(shape$hat_shape)], c("sim_id", "lag_min", "mean")]
+    seen <- c(seen, shape$sim_id)
+  }
+  list(shape = do.call(rbind, shapes), eg = do.call(rbind, kept))
 }
-curve_files <- newest_first("^curves_.*\\.csv$")
-curves <- do.call(rbind, lapply(curve_files, function(f) cbind(read_curves(f), file = match(f, curve_files))))
-curves <- curves[order(curves$file), ]
-keep <- !duplicated(curves[, c("sim_id", "pair", "lag_min")])
-curves <- curves[keep, c("sim_id", "pair", "lag_min", "mean")]
-curves$lag_min <- round(curves$lag_min, 2)              # the same lags in every file and in the experiment
+
+sims <- read_simulations(run_dir)
+sims$sim_id <- as.integer(sims$sim_id)
+metric_files <- list.files(results, pattern = "^metrics_.*\\.csv$", full.names = TRUE)
+if (!length(metric_files)) stop("no metrics files in ", results)
+metric_files <- metric_files[order(file.mtime(metric_files), decreasing = TRUE)]
+wanted <- c("sim_id", "nrmse_reporter_EG", "nrmse_reporter_EE", "nrmse_reporter_GG", "on_E", "on_G")
+metrics <- do.call(rbind, lapply(metric_files, read_cols, keep = function(h) h %in% wanted))
+metrics <- metrics[!duplicated(metrics$sim_id), ]
+read <- read_shapes(results)
+eg <- read$eg
 experiment <- read.csv(args[3])
 experiment <- experiment[experiment$observable == "reporter", ]
 experiment$lag_min <- round(experiment$lag_min, 2)
 
-table <- merge(sims, metrics[, c("sim_id", "nrmse_reporter_EG", "nrmse_reporter_EE", "nrmse_reporter_GG", "on_E", "on_G")],
-               by = "sim_id")
+table <- merge(merge(sims, metrics, by = "sim_id"), read$shape, by = "sim_id")
 table$nrmse_xcor <- table$nrmse_reporter_EG
 table$nrmse_mean3 <- rowMeans(table[, c("nrmse_reporter_EG", "nrmse_reporter_EE", "nrmse_reporter_GG")])
 table$rank_value <- if (RANK_BY == "mean3") table$nrmse_mean3 else table$nrmse_xcor
-cat(nrow(table), "simulations with results in", results, "\n")
-
-# Hat shape of every simulation and of the experiment (reporter cross-correlation)
-hat <- function(lag, value) c(center = mean(value[abs(lag) <= CENTER_MIN + 1e-9], na.rm = TRUE),
-                              flanks = mean(value[abs(lag) >= FLANKS_MIN[1] & abs(lag) <= FLANKS_MIN[2]], na.rm = TRUE))
-eg <- curves[curves$pair == "EG", ]
-shape <- do.call(rbind, lapply(split(eg, eg$sim_id), function(d) c(sim_id = d$sim_id[1], hat(d$lag_min, d$mean))))
-table <- merge(table, as.data.frame(shape), by = "sim_id")
+table$hat_shape[is.na(table$hat_shape)] <- FALSE
 exp_eg <- experiment[experiment$pair == "EG", ]
 exp_hat <- hat(exp_eg$lag_min, exp_eg$mean)
-table$hat_shape <- table$center >= CENTER_AT_LEAST & table$flanks <= FLANKS_AT_MOST
 table$group <- factor(table$group, levels = c(GROUP_ORDER, "uncoupled"))
+cat(nrow(table), "simulations with results in", results, "\n")
 
 # ---------------------------------------------------------------------------
 # 1. Shape map
@@ -113,6 +177,8 @@ counts <- do.call(rbind, lapply(split(coupled, coupled$group), function(d) data.
     format(sum(d$hat_shape), big.mark = ","), format(nrow(d), big.mark = ",")))))
 labels <- setNames(counts$label, counts$group)
 uncoupled <- table[table$group == "uncoupled", ]
+coupled <- do.call(rbind, lapply(split(coupled, coupled$group), function(d)
+  if (nrow(d) > MAX_POINTS) d[sample.int(nrow(d), MAX_POINTS), ] else d))
 coupled <- coupled[order(-coupled$nrmse_xcor), ]           # best drawn last, on top
 limits <- function(v, extra) range(c(quantile(v, c(0.01, 0.99), na.rm = TRUE), extra))
 p1 <- ggplot(coupled, aes(center, flanks)) +
@@ -339,15 +405,14 @@ if (nrow(selected2)) {
   top <- head(best[order(best$rank), ], TOP_CURVES)
   ids <- as.integer(top$sim_id)
   read_top <- function(folder) {                       # mean and SE of the cross-correlation of the top simulations
-    files <- list.files(folder, pattern = "^curves_[0-9]+-[0-9]+\\.csv$", full.names = TRUE)
-    bounds <- do.call(rbind, lapply(strsplit(sub("^curves_([0-9]+)-([0-9]+)\\.csv$", "\\1 \\2", basename(files)), " "), as.integer))
+    files <- curve_files(folder)
+    if (!length(files)) return(NULL)
+    bounds <- do.call(rbind, lapply(strsplit(sub("^curves_([0-9]+)-([0-9]+)\\..*$", "\\1 \\2", basename(files)), " "), as.integer))
     files <- files[vapply(seq_along(files), function(i) any(ids >= bounds[i, 1] & ids <= bounds[i, 2]), TRUE)]
-    files <- files[order(file.mtime(files), decreasing = TRUE)]
     if (!length(files)) return(NULL)
     d <- do.call(rbind, lapply(files, function(f) {
-      header <- names(read.csv(f, nrows = 1))
-      part <- read.csv(f, colClasses = ifelse(grepl("^rep", header), "NULL", NA))
-      part[part$observable == "reporter" & part$pair == "EG" & part$sim_id %in% ids, c("sim_id", "lag_min", "mean", "se")]
+      part <- read_curve_file(f)
+      part[part$pair == "EG" & part$sim_id %in% ids, c("sim_id", "lag_min", "mean", "se")]
     }))
     d$lag_min <- round(d$lag_min, 2)
     d[!duplicated(d[, c("sim_id", "lag_min")]), ]

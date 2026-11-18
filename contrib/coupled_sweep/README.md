@@ -34,6 +34,9 @@ Three commands; everything else in this folder is optional.
 Rscript paper_figures.R runs/semi_extensive_insert_steps 11 data/experimental.csv CCAT1_predictedtraces.csv MYC_predictedtraces.csv figures_insert11
 ```
 
+Earlier runs without insert steps: give `none` as the insert, e.g. `Rscript paper_figures.R runs/grid none ...`;
+expanded runs: give `<run_root>/<profile>` as the run folder.
+
 `paper_figures.R` (R with ggplot2; settings at its top) writes, in order: `1_shape_map` (every simulation's
 cross-correlation centre, within +/-5 min, against its flanks, 20 to 60 min, coloured by NRMSE; shaded = Mexican-hat
 shape = selection 1), `2_folds_data_vs_simulations` (for every CCAT1-MYC connection: the fold in each experimental
