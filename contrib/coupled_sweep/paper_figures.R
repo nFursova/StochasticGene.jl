@@ -50,6 +50,8 @@ TOP_FRACTION  <- 0.25           # candidates: the best this fraction of architec
 NRMSE_CUTOFF  <- NA             # ... or, if a number, every architecture with NRMSE below it
 HEATMAP_LAG   <- 120            # heatmap lag range, minutes
 MAX_HEATMAP_ROWS <- 20000       # heatmaps: above this many passing simulations, the best one per architecture is drawn
+                                # (and if still more, the best MAX_HEATMAP_ROWS of those)
+RANK_PLOT_MAX <- 100            # figure 5: the best this many architectures are drawn (the CSVs list all)
 TOP_CURVES    <- Inf            # figure 6: this many best architectures of selection 2 (Inf = all)
 PANELS_PER_PAGE <- 24           # figure 6: panels per page (6 rows of 4); one multi-page PDF, one PNG per page
 INSERT_COLOURS <- c(`11` = "#2a78d6", `13` = "#eb6834", `33` = "#1baf7a")   # figure 6: insert-step variants
@@ -78,7 +80,8 @@ SOURCES <- c("1", "2", "3", "R", "3+R")
 GENE <- c(E = "CCAT1", G = "MYC")
 save_plot <- function(plot, name, width, height) {
   ggsave(file.path(out, paste0(name, ".pdf")), plot, width = width, height = height, limitsize = FALSE)
-  ggsave(file.path(out, paste0(name, ".png")), plot, width = width, height = height, dpi = 300, limitsize = FALSE)
+  dpi <- min(300, floor(45000 / max(width, height)))     # PNGs stay under the 50,000-pixel limit
+  ggsave(file.path(out, paste0(name, ".png")), plot, width = width, height = height, dpi = dpi, limitsize = FALSE)
 }
 
 # ---------------------------------------------------------------------------
@@ -499,7 +502,12 @@ heatmap <- function(selected, title) {
   if (nrow(selected) > MAX_HEATMAP_ROWS) {               # too many rows to draw: the best per architecture
     selected <- selected[order(selected$rank_value), ]
     selected <- selected[!duplicated(selected$model_id), ]
-    title <- paste0(title, sprintf(" (more than %s: best parameter set per architecture shown)", format(MAX_HEATMAP_ROWS, big.mark = ",")))
+    title <- paste0(title, sprintf(" (more than %s: best parameter set per architecture shown", format(MAX_HEATMAP_ROWS, big.mark = ",")))
+    if (nrow(selected) > MAX_HEATMAP_ROWS) {
+      selected <- selected[seq_len(MAX_HEATMAP_ROWS), ]
+      title <- paste0(title, sprintf(", the best %s architectures", format(MAX_HEATMAP_ROWS, big.mark = ",")))
+    }
+    title <- paste0(title, ")")
   }
   selected <- selected[order(selected$group, selected$rank_value), ]
   selected$row <- ave(seq_len(nrow(selected)), selected$group, FUN = seq_along)
@@ -550,15 +558,17 @@ if (nrow(selected2)) {
   ranked <- ranked[, colSums(!is.na(ranked) & ranked != "") > 0]
   write.csv(ranked, file.path(out, "5_ranked_architectures.csv"), row.names = FALSE)
   write.csv(ranked[ranked$candidate, ], file.path(out, "5_candidates_to_fit.csv"), row.names = FALSE)
-  best$model_id <- factor(best$model_id, levels = rev(best$model_id))
-  p5 <- ggplot(best, aes(rank_value, model_id, colour = group, shape = candidate)) +
+  shown5 <- head(best, RANK_PLOT_MAX)
+  shown5$model_id <- factor(shown5$model_id, levels = rev(shown5$model_id))
+  p5 <- ggplot(shown5, aes(rank_value, model_id, colour = group, shape = candidate)) +
     geom_point(size = 1.6) +
     scale_colour_manual(NULL, values = GROUP_COLOURS) + scale_shape_manual("candidate", values = c(`TRUE` = 16, `FALSE` = 1)) +
     labs(x = if (RANK_BY == "mean3") "mean NRMSE (cross-correlation and both autocorrelations)" else "NRMSE of the cross-correlation",
-         y = NULL, title = sprintf("Selection 2 architectures (best parameter set each), best first; candidates = %s",
+         y = NULL, title = sprintf("Selection 2: the best %d of %d architectures (best parameter set each), best first; candidates = %s",
+                                   nrow(shown5), nrow(best),
                                    if (is.na(NRMSE_CUTOFF)) sprintf("top %g%%", 100 * TOP_FRACTION) else sprintf("NRMSE < %g", NRMSE_CUTOFF))) +
     theme_classic(base_size = 7) + theme(plot.title = element_text(size = 8.5, face = "bold"))
-  save_plot(p5, "5_ranking", 9, max(3, 0.13 * nrow(best) + 1.2))
+  save_plot(p5, "5_ranking", 9, max(3, 0.13 * nrow(shown5) + 1.2))
 
   # 6. Top architectures: experiment and simulation, with the reporter at insert steps 11, 13 and 33
   top <- head(best[order(best$rank), ], TOP_CURVES)
