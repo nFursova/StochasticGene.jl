@@ -224,6 +224,7 @@ Each swarm job writes one `curves_` and one `metrics_` file, named by its first 
   Hidden models activate ([sweep] hidden_effect = "activating", the default): they speed R12, R23 and Initiate
   (fold above 1) and slow R21 and R32 (fold below 1). "both" allows either direction; "increase" puts every hidden
   fold above 1, also for R21 and R32 (the behaviour of runs made before hidden_effect existed).
+  Expanded runs: the same setting, `[sampling] hidden_effect`, in `config_expanded.toml`.
 - Reciprocal models, `[sweep] reciprocal_states`: `"same"` uses the same source state and the same fold in
   both directions; `"all_pairs"` uses every pair of source states and every pair of folds, so one direction
   can activate while the other inhibits.

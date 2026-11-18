@@ -216,10 +216,31 @@ def config_name(name):
     return "_".join(name.split("_")[:2]) if name.startswith("fold_") else name
 
 
+REVERSE_RATES = ("R21", "R32")      # rates that turn a gene off; an activating hidden unit slows them
+
+
+def hidden_effect(settings):
+    """[sampling] hidden_effect: "activating" (default): hidden folds sampled over fold_HE / fold_HG (1 or above)
+    speed R12, R23 and Initiate, and their inverse slows R21 and R32, so the hidden unit always turns genes on;
+    "both": every hidden fold from 1/largest to largest; "increase": every hidden fold as sampled, 1 or above, also
+    for R21 and R32 (which then turns the genes off: the behaviour before hidden_effect existed)."""
+    effect = settings["config"]["sampling"].get("hidden_effect", "activating")
+    if effect not in ("activating", "both", "increase"):
+        raise ValueError('[sampling] hidden_effect must be "activating", "both" or "increase"')
+    return effect
+
+
+def is_hidden_fold(name):
+    return name.startswith(("fold_HE_", "fold_HG_"))
+
+
 def axis_range(name, settings):
     sampling = settings["config"]["sampling"]
     key = "coupling_fold" if name.startswith("fold_") else "hidden_rate"
-    return checked_range(sampling.get("ranges", {}).get(config_name(name), sampling[key]), name)
+    low, high = checked_range(sampling.get("ranges", {}).get(config_name(name), sampling[key]), name)
+    if is_hidden_fold(name) and hidden_effect(settings) == "both":
+        return 1 / high, high
+    return low, high
 
 
 def log_levels(low, high, count):
@@ -250,10 +271,15 @@ def parameter_sets(model, settings):
             seed = int.from_bytes(hashlib.sha256(seed_text.encode()).digest(), "big")
             random.Random(seed).shuffle(values)
             columns[name] = values
+    effect = hidden_effect(settings)
     for index in range(count):
         point = {name: column[index] for name, column in columns.items()}
         if model["group"] == "H3_symmetric":
             point.update(h23=point["h21"], h32=point["h12"])
+        if effect == "activating":                        # an activating hidden unit slows the reverse rates
+            for name in point:
+                if is_hidden_fold(name) and name.split("_")[2] in REVERSE_RATES:
+                    point[name] = 1 / point[name]
         yield point
 
 
