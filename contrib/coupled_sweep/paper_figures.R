@@ -142,10 +142,11 @@ read_tracks <- function(path) {
 }
 tracks <- list(E = read_tracks(args[4]), G = read_tracks(args[5]))
 stopifnot(length(tracks$E) == length(tracks$G))
-# Per track: conditions of the source (frames 1..n-1) and, per rate of the target, frames at risk and events.
+# Per track: the number of coupling effects of each source condition at frames 1..n-1, as in the model:
+# states 1, 2, 3: 1 while in that state; R: the number of reporters; 3+R: 1 in state 3 plus the number of reporters.
 conditions <- function(t, n) {
-  s <- t$state[seq_len(n - 1)]; r <- t$reporters[seq_len(n - 1)] > 0
-  cbind(`1` = s == 1, `2` = s == 2, `3` = s == 3, R = r, `3+R` = s == 3 | r) * 1
+  s <- t$state[seq_len(n - 1)]; r <- t$reporters[seq_len(n - 1)]
+  cbind(`1` = s == 1, `2` = s == 2, `3` = s == 3, R = r, `3+R` = (s == 3) + r) * 1
 }
 rates <- function(t, n) {
   s <- t$state; f <- t$first; now <- seq_len(n - 1); nxt <- now + 1
@@ -153,13 +154,18 @@ rates <- function(t, n) {
   event <- cbind(R12 = s[nxt] == 2, R21 = s[nxt] == 1, R23 = s[nxt] == 3, R32 = s[nxt] == 2, Initiate = f[nxt] == 1) & risk
   list(risk = risk * 1, event = event * 1)
 }
-# Fold of one track: rate while the condition holds / rate otherwise (0.5 added to the event counts);
+# Fold of one track, as in the model: the rate is base x (1 + (fold - 1) x n), n = number of coupling effects.
+# The base comes from the frames with n = 0; the fold makes the expected events in the frames with n > 0 equal the
+# observed ones:  fold = 1 + (k1 x T0 / k0 - T1) / N1   (k = events, T = frames at risk, N1 = sum of n over the
+# frames with n > 0; 0.5 added to the event counts). For states 1, 2 and 3 (n = 1) this is simply
+# (rate while in the state) / (rate otherwise). Folds below 0.001 are held at 0.001 (the model clips too).
 # NA without MIN_FRAMES frames on each side or without any event. Returns a 5 (condition) x 5 (rate) matrix.
 track_fold <- function(C, R) {
-  T1 <- crossprod(C, R$risk); k1 <- crossprod(C, R$event)
+  on <- (C > 0) * 1
+  T1 <- crossprod(on, R$risk); k1 <- crossprod(on, R$event); N1 <- crossprod(C, R$risk)
   T0 <- matrix(colSums(R$risk), nrow(T1), ncol(T1), byrow = TRUE) - T1
   k0 <- matrix(colSums(R$event), nrow(T1), ncol(T1), byrow = TRUE) - k1
-  fold <- ((k1 + 0.5) / T1) / ((k0 + 0.5) / T0)
+  fold <- pmax(1 + ((k1 + 0.5) * T0 / (k0 + 0.5) - T1) / N1, 1e-3)
   fold[T1 < MIN_FRAMES | T0 < MIN_FRAMES | (k1 + k0) == 0] <- NA
   fold
 }

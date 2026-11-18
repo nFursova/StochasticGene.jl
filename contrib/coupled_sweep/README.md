@@ -37,7 +37,8 @@ Rscript paper_figures.R runs/semi_extensive_insert_steps 11 data/experimental.cs
 `paper_figures.R` (R with ggplot2; settings at its top) writes, in order: `1_shape_map` (every simulation's
 cross-correlation centre, within +/-5 min, against its flanks, 20 to 60 min, coloured by NRMSE; shaded = Mexican-hat
 shape = selection 1), `2_folds_data_vs_simulations` (for every CCAT1-MYC connection: the fold in each experimental
-track, blue, and with the pairing broken by 1,000 circular shifts and 1,000 permutations of cells, grey, against the
+track, estimated with the model's form, rate x (1 + (fold - 1) x n) with n = number of reporters for R and
+1 + reporters in state 3 for 3+R, blue, and with the pairing broken by 1,000 circular shifts and 1,000 permutations of cells, grey, against the
 folds of the hat-shaped simulations, points), `3_heatmap_selection1`, `4_heatmap_selection2` (selection 1 with every
 fold inside the middle 50% of the experimental tracks' folds; hidden-unit models have no observable fold and stay),
 and `5_ranking` with `5_candidates_to_fit.csv` (best parameter set per architecture of selection 2, ranked by NRMSE;
