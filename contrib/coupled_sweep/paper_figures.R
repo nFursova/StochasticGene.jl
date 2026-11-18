@@ -52,6 +52,8 @@ SEED          <- 20261118
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) != 6) stop("usage: Rscript paper_figures.R RUN_DIR INSERT EXPERIMENTAL_CSV CCAT1_PREDICTED MYC_PREDICTED OUTPUT_FOLDER")
+if (!dir.exists(args[1]) && dir.exists(args[2])) args[1:2] <- args[2:1]   # accept INSERT RUN_DIR as well
+if (!dir.exists(args[1])) stop("run folder not found: ", args[1])
 run_dir <- args[1]; insert <- if (args[2] %in% c("", "none", "-")) "" else args[2]; out <- args[6]
 results <- file.path(run_dir, "results", if (nzchar(insert)) paste0("insert", insert) else "")
 if (nzchar(insert) && !dir.exists(results)) {           # a run made without insert steps
