@@ -298,7 +298,17 @@ write.csv(data_summary, file.path(out, "2_data_folds.csv"), row.names = FALSE)
 range_of <- with(data_summary[data_summary$kind == "experiment" & data_summary$component %in% measured, ],
                  setNames(Map(c, low, high), component))
 
-# Folds of the hat-shaped simulations, one row per simulation and connection component
+# Folds of the hat-shaped simulations, one row per simulation and connection component. A 3+R connection with a
+# reporter fold (fold_..._reporter, runs made after 3+R got independent folds) gives two components, 3 and R;
+# older runs share one fold, shown as 3+R.
+fold_of <- function(row, edge, rate, suffix = "") {
+  for (name in paste0("fold_", edge, c(paste0("_", rate), ""), suffix)) {
+    value <- row[[name]]
+    if (!is.null(value) && !is.na(value) && nzchar(value)) return(as.numeric(value))
+  }
+  NA_real_
+}
+split_3R <- any(grepl("^fold_(EG|GE).*_reporter$", names(table)))
 components_of <- function(row) {
   rows <- list()
   for (edge in c("EG", "GE")) {
@@ -306,10 +316,13 @@ components_of <- function(row) {
     if (is.na(set) || !nzchar(set)) next
     src <- substr(edge, 1, 1); tgt <- substr(edge, 2, 2)
     for (rate in strsplit(set, "+", fixed = TRUE)[[1]]) {
-      value <- row[[paste0("fold_", edge, "_", rate)]]
-      if (is.null(value) || is.na(value) || !nzchar(value)) value <- row[[paste0("fold_", edge)]]
-      rows[[length(rows) + 1]] <- data.frame(sim_id = row$sim_id, model_id = row$model_id, group = as.character(row$group),
-        component = sprintf("%s %s -> %s %s", GENE[src], row[[paste0(edge, "_state")]], GENE[tgt], rate), fold = as.numeric(value))
+      folds <- list(fold_of(row, edge, rate))
+      names(folds) <- row[[paste0(edge, "_state")]]
+      reporter <- fold_of(row, edge, rate, "_reporter")
+      if (names(folds) == "3+R" && !is.na(reporter)) folds <- list(`3` = folds[[1]], R = reporter)   # independent folds
+      for (state in names(folds))
+        rows[[length(rows) + 1]] <- data.frame(sim_id = row$sim_id, model_id = row$model_id, group = as.character(row$group),
+          component = sprintf("%s %s -> %s %s", GENE[src], state, GENE[tgt], rate), fold = as.numeric(folds[[state]]))
     }
   }
   if (length(rows)) do.call(rbind, rows) else NULL
@@ -323,8 +336,9 @@ count_components <- function(tab) {
     combos <- table(paste(state[ok], set[ok], sep = "|"))
     for (k in names(combos)) {
       parts <- strsplit(k, "|", fixed = TRUE)[[1]]
-      for (rate in strsplit(parts[2], "+", fixed = TRUE)[[1]]) {
-        name <- sprintf("%s %s -> %s %s", GENE[substr(edge, 1, 1)], parts[1], GENE[substr(edge, 2, 2)], rate)
+      states <- if (split_3R && parts[1] == "3+R") c("3", "R") else parts[1]
+      for (rate in strsplit(parts[2], "+", fixed = TRUE)[[1]]) for (state in states) {
+        name <- sprintf("%s %s -> %s %s", GENE[substr(edge, 1, 1)], state, GENE[substr(edge, 2, 2)], rate)
         counts[name] <- sum(counts[name], combos[[k]], na.rm = TRUE)
       }
     }

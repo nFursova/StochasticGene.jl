@@ -211,7 +211,8 @@ struct Edge
     source::Int    # 1 = E, 2 = G, 3 = H
     states::Vector{Int}  # promoter states 1 to 3 (hidden states for H) that regulate, any of them (e.g. [1, 2]);
                    # 4 = "R": StochasticGene's Rsum, every occupied reporter position adds one coupling effect;
-                   # [3, 4] = "3+R": state 3 adds one effect and every occupied reporter position adds another
+                   # [3, 4] = "3+R" with one shared fold (lists made before "3+R" had a reporter fold;
+                   # newer lists split "3+R" into a [3] and a [4] connection with their own folds)
     target::Int    # 1 = E, 2 = G
     rate::Int      # index into RATE_NAMES
     gamma::Float64 # fold - 1 of this connection (fold_EG, fold_GE, fold_HE or fold_HG)
@@ -367,9 +368,21 @@ function build_model(row, fitted, matching)
         value = get(row, "fold_$(edge)_$(rate)", "")
         isempty(value) ? (haskey(row, "fold_$edge") ? row["fold_$edge"] : row["fold"]) : value
     end
+    # "3+R": the reporter fold is the same column with "_reporter" appended; lists without it share one fold.
+    function reporter_fold(edge, rate)
+        value = get(row, "fold_$(edge)_$(rate)_reporter", "")
+        isempty(value) ? get(row, "fold_$(edge)_reporter", "") : value
+    end
     function connect(edge, source, states, target)
         for name in split(row["$(edge)_rates"], '+'; keepempty=false)
-            push!(edges, Edge(source, states, target, findfirst(==(name), RATE_NAMES), parse(Float64, fold(edge, name)) - 1))
+            rate = findfirst(==(name), RATE_NAMES)
+            reporter = states == [3, 4] ? reporter_fold(edge, name) : ""
+            if isempty(reporter)
+                push!(edges, Edge(source, states, target, rate, parse(Float64, fold(edge, name)) - 1))
+            else                                        # 3+R with independent folds: two connections onto the rate
+                push!(edges, Edge(source, [3], target, rate, parse(Float64, fold(edge, name)) - 1))
+                push!(edges, Edge(source, [4], target, rate, parse(Float64, reporter) - 1))
+            end
         end
     end
     states(text) = [part == "R" ? 4 : parse(Int, part) for part in split(text, '+')]     # "3", "1+2", "R" or "3+R"
@@ -438,7 +451,7 @@ function simulate_stochasticgene(model, cfg)
     #       (regulates E), state 3 stays state 3 (regulates G). H2 needs nothing (state 2 regulates).
     #   A connection whose regulating states include state 1 (after renumbering) is written the equivalent
     #       way round: the rate is fold times higher, and every other state divides it by fold. This is exact
-    #       because no rate here is regulated by more than one connection.
+    #       only when no other connection regulates that rate (3+R's two connections never include state 1).
     #   R is StochasticGene's Rsum: one connection from each reporter position (source states 4, 5, 6).
     renumber(state) = model.nh == 3 ? (2, 1, 3)[state] : state
     hidden_transitions = model.nh == 3 ? ((2, 1), (1, 2), (1, 3), (3, 1)) : GENE_TRANSITIONS[1:2]    # order of h12 h21 h23 h32
@@ -446,12 +459,12 @@ function simulate_stochasticgene(model, cfg)
     connections = NTuple{4,Int}[]       # (source unit, source state, target unit, target rate)
     gammas = Float64[]                  # one coupling strength per connection
     for edge in model.edges
-        count(other -> (other.target, other.rate) == (edge.target, edge.rate), model.edges) == 1 ||
-            error("$(model.id): $(RATE_NAMES[edge.rate]) is regulated by more than one connection")
         states = edge.source == 3 ? renumber.(edge.states) :
                  vcat(filter(<(4), edge.states), 4 in edge.states ? [4, 5, 6] : Int[])     # R: one connection per position
         gamma = edge.gamma
         if 1 in states                                  # the unit starts in a regulating state: write it the other way round
+            count(other -> (other.target, other.rate) == (edge.target, edge.rate), model.edges) == 1 ||
+                error("$(model.id): $(RATE_NAMES[edge.rate]) is regulated by more than one connection")
             base[edge.target, edge.rate] *= 1 + gamma
             states = setdiff(1:(edge.source == 3 ? model.nh : 3), states)
             gamma = 1 / (1 + gamma) - 1

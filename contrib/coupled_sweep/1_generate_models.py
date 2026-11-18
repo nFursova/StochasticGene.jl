@@ -24,7 +24,9 @@ RATE_SETS = ["R12", "R21", "R23", "R32", "Initiate",
 # States of the source gene that regulate, in the gene-to-gene models (E_to_G, G_to_E and reciprocal):
 # promoter state 1, 2 or 3, or R = StochasticGene's "Rsum": every occupied reporter position of the source
 # gene adds one coupling effect, so the rate is multiplied by 1 + (fold - 1) * (number of occupied positions).
-# "3+R": promoter state 3 adds one coupling effect and every occupied reporter position adds another.
+# "3+R": state 3 and the reporters regulate with independent folds, added as StochasticGene adds two connections onto
+# one rate: 1 + (fold - 1) * (1 in state 3) + (reporter fold - 1) * (number of occupied positions). The reporter fold
+# is the column with "_reporter" appended (fold_EG_reporter, or fold_EG_R21_reporter in extensive mode).
 # The default list; [sweep] source_states replaces it (for example ["1", "2", "3", "R", "3+R"]).
 SOURCE_STATES = ["1", "2", "3", "R"]
 
@@ -52,6 +54,8 @@ PARAMETERS = ["fold_EG", "fold_GE", "fold_HE", "fold_HG", "h12", "h21", "h23", "
 FORWARD_RATES = ("R12", "R23", "Initiate")
 # Extensive sweep: every regulated rate of a connection has its own fold, e.g. fold_EG_R12 and fold_EG_R23.
 RATE_FOLDS = [f"fold_{edge}_{rate}" for edge in ("EG", "GE", "HE", "HG") for rate in ("R12", "R21", "R23", "R32", "Initiate")]
+# The reporter folds of "3+R" connections (columns written only when source_states has "3+R").
+REPORTER_FOLDS = [f"{name}_reporter" for name in ["fold_EG", "fold_GE"] + RATE_FOLDS[:10]]
 
 
 def model(group, name, EG="", GE="", HE="", HG="", EG_state="3", GE_state="3", control=False):
@@ -107,6 +111,7 @@ def swept_parameters(m, sweep):
       fold for both connections.
     - Extensive: every regulated rate has its own fold (fold_EG_R12, fold_EG_R23, ...), each sampled over the range
       of its connection in [sweep.extensive]; all of them independent (in "same" reciprocal models too).
+    - "3+R" connections also get a reporter fold for every fold above (name + "_reporter"), sampled independently.
     """
     grid = sweep["mode"] == "grid"
     gene_folds = sorted([1 / fold for fold in sweep["coupling_fold"]] + list(sweep["coupling_fold"]))
@@ -114,10 +119,10 @@ def swept_parameters(m, sweep):
     free, tied = {}, {}
 
     def connection(edge, grid_values):
-        if grid:
-            free[f"fold_{edge}"] = grid_values
-        else:
-            free.update({f"fold_{edge}_{rate}": extensive[f"fold_{edge}"] for rate in m[f"{edge}_rates"].split("+")})
+        names = [f"fold_{edge}"] if grid else [f"fold_{edge}_{rate}" for rate in m[f"{edge}_rates"].split("+")]
+        if m.get(f"{edge}_state") == "3+R":             # state 3 and the reporters: independent folds
+            names += [f"{name}_reporter" for name in names]
+        free.update({name: grid_values if grid else extensive[f"fold_{edge}"] for name in names})
 
     if m["group"] == "E_to_G":
         connection("EG", gene_folds)
@@ -126,7 +131,7 @@ def swept_parameters(m, sweep):
     elif m["group"] == "reciprocal":
         connection("EG", gene_folds)
         if grid and sweep.get("reciprocal_states", "same") == "same":
-            tied["fold_GE"] = "fold_EG"
+            tied.update({name.replace("EG", "GE"): name for name in free if name.startswith("fold_EG")})
         else:
             connection("GE", gene_folds)
     elif m["group"] in HIDDEN_GROUPS:
@@ -228,6 +233,7 @@ def main():
         raise SystemExit(f"{run_dir} already holds results; choose a new [output] run_dir")
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    columns = PARAMETERS + RATE_FOLDS + (REPORTER_FOLDS if "3+R" in sweep.get("source_states", SOURCE_STATES) else [])
     model_rows, simulation_rows = [], []
     for m in all_models(sweep):
         sets = parameter_sets(m, sweep)
@@ -235,10 +241,10 @@ def main():
         for s in sets:
             simulation_rows.append(dict(
                 sim_id=len(simulation_rows) + 1, **{k: m[k] for k in m if k != "control"},
-                **{name: f"{s[name]:.6g}" if name in s else "" for name in PARAMETERS + RATE_FOLDS}))
+                **{name: f"{s[name]:.6g}" if name in s else "" for name in columns}))
         model_rows.append(dict(
             **{k: m[k] for k in m if k != "control"}, control="yes" if m["control"] else "",
-            **{name: describe(m, name, sets, sweep) for name in PARAMETERS + RATE_FOLDS},
+            **{name: describe(m, name, sets, sweep) for name in columns},
             n_simulations=len(sets), first_sim_id=first_id, last_sim_id=len(simulation_rows)))
 
     for name, rows in [("models.csv", model_rows), ("simulations.csv", simulation_rows)]:

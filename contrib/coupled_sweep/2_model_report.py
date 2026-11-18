@@ -142,8 +142,11 @@ def regulated_rates(rows):
 def parameters_of(row):
     """(column, label) of every parameter in a row of models.csv or of the simulation list, including the folds of
     single regulated rates (fold_EG_R12: "fold of E regulating G, rate R12") of the extensive sweep."""
-    rate_folds = [(k, f'{PARAMETERS["_".join(k.split("_")[:2])]}, rate {k.split("_")[2]}')
-                  for k in row if k.startswith("fold_") and k.count("_") == 2]
+    def label(k):                                       # fold_EG_R12, fold_EG_R12_reporter or fold_EG_reporter
+        parts = k.split("_")
+        extra = [f"rate {part}" if part != "reporter" else "reporters of 3+R" for part in parts[2:]]
+        return f'{PARAMETERS["_".join(parts[:2])]}, {", ".join(extra)}'
+    rate_folds = [(k, label(k)) for k in row if k.startswith("fold_") and k.count("_") in (2, 3) and "_".join(k.split("_")[:2]) in PARAMETERS]
     return list(PARAMETERS.items()) + rate_folds
 
 
