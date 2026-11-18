@@ -15,12 +15,14 @@ export SG_FROM="$(IFS=,; echo "${FOLDERS[*]}")"
 export SG_INTO_SUFFIX='-continue-72h'
 export SG_MAXTIME=259200         # 72 hours
 export SG_RATETYPE=median
-export SG_MEMORY_GB=90
+export SG_MEMORY_GB=90           # 30_continue_coupled.jl sizes the swarm memory itself; this replaces it below
 unset SG_SWARMROOT SG_ONLY SG_PROPCV SG_WARMUPSTEPS SG_NCHAINS
 
 cd "$SG_ROOT"
 julia --project="$SG_PROJECT" scripts/30_continue_coupled.jl
 
 for from in "${FOLDERS[@]}"; do
-  bash "$SG_ROOT/swarm_${from}-continue-72h/submit_all.sh"
+  submit="$SG_ROOT/swarm_${from}-continue-72h/submit_all.sh"
+  sed -i -E "s/-g [0-9]+/-g $SG_MEMORY_GB/" "$submit"
+  bash "$submit"
 done

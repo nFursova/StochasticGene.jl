@@ -26,6 +26,11 @@ Each run writes two files into <run_dir>/results/:
                                  reporter counts of every replicate (columns on_E_rep1, ...), and clipped (1 if a
                                  rate multiplier would have gone below MIN_FACTOR and was held there)
 
+Theory curves ([simulation] curves = "theory"): the curves are the expected value of the correlation estimator,
+computed from the exact joint chain (see theory_curves), instead of the mean over simulated replicates; their SE
+is 0 and the curves files have no replicate columns. The replicates are still simulated, for the ON fractions,
+reporter means and trace statistics (10 replicates are plenty for those).
+
 Insert steps ([simulation] insert_steps, e.g. ["11", "13", "33"]): the same simulations are also analysed as if
 the reporter were inserted at a later position: "13" counts CCAT1 transcripts from position 1 and MYC transcripts
 only from position 3 (the first digit is CCAT1, the second MYC). Every variant is written to its own folder,
@@ -89,6 +94,7 @@ function read_config(path, profile)
     lengths = isempty(config["inputs"]["trace_lengths"]) ? fill(sim["nframes"], sim["ntraces"]) :
               [parse(Int, row["nframes"]) for row in read_csv(input("trace_lengths"))]
     minimum(lengths) >= 17 || error("every trace needs at least 17 frames for the multi-tau correlation")
+    get(sim, "curves", "simulated") in ("simulated", "theory") || error("[simulation] curves must be \"simulated\" or \"theory\"")
     # Experimental curves: (observable, pair, lag in frames) => value.
     targets = Dict{Tuple{String,String,Int},Float64}()
     for row in read_csv(input("experimental_curves"))
@@ -100,6 +106,7 @@ function read_config(path, profile)
        lengths, ntraces=length(lengths), nframes=maximum(lengths), targets,
        simulator=sim["simulator"], replicates, interval=sim["interval_min"],
        rate_matching=get(sim, "rate_matching", "time_average"),
+       curves=get(sim, "curves", "simulated"),                          # "simulated" or "theory"
        warmup_timescales=get(sim, "warmup_timescales", 3.0), epsilon=sim["epsilon"],
        insert_steps=String.(get(sim, "insert_steps", [""])),           # "" = every position counted, results/
        max_lag=sim["score_max_lag_min"], seed=sim["seed"], swarm=config["swarm"])
@@ -634,6 +641,103 @@ function correlation_curves(counts, cfg)
     rows
 end
 
+"""
+Theoretical curves ([simulation] curves = "theory"): the expected value of the estimator above (multi_tau_corr and
+coulon_multitau_mean) for this model, from the exact moments m(d) = E[x(t) y(t + d)] of the joint chain (d frames
+apart; x and y are the observable of the two genes, plus epsilon, as in correlation_curves), instead of the mean
+over simulated replicates.
+
+For one trace the estimator at a lag is close to a covariance centred on the trace's own means,
+    (mean of the products x y at that lag)  -  (mean of x) (mean of y),
+and the curve is its average over traces divided by (long-run mean x) (long-run mean y). The expectation of this is a
+weighted sum of m(d) (see expected_multitau); the second term is what centring each trace on its own mean subtracts.
+The approximation: the ratios of sums inside the estimator are replaced by the ratios of their expected values
+(exact for long traces and many traces). The lags are those of the simulated curves.
+Returns the curves of every insert-step variant, each ordered as correlation_curves.
+"""
+function theory_curves(model, cfg)
+    destinations, rates = system_transitions(model, model.base)
+    n = length(rates)
+    Q = zeros(n, n)
+    for s in 1:n, (target, rate) in zip(destinations[s], rates[s])
+        Q[s, target] += rate
+        Q[s, s] -= rate
+    end
+    Pt = permutedims(exp(Q .* cfg.interval))            # transposed one-frame transition matrix
+    prob = stationary(destinations, rates)
+    states = [sstate(model, s) for s in 1:n]
+    dmax = cfg.nframes - 1
+    map(cfg.insert_steps) do variant
+        first_E, first_G = variant == "" ? (1, 1) : parse.(Int, collect(variant))
+        counts = (Float64[count_ones(b >> (first_E - 1)) for (_, b, _) in states],
+                  Float64[count_ones(b >> (first_G - 1)) for (_, _, b) in states])
+        rows = NamedTuple[]
+        for observable in OBSERVABLES
+            f = [(observable == "binary" ? Float64.(c .> 0) : c) .+ cfg.epsilon for c in counts]
+            means = [dot(prob, g) for g in f]
+            m = [zeros(dmax + 1, 2) for _ in 1:2]           # m[i][d + 1, j] = E[f_i(t) f_j(t + d)]
+            for i in 1:2
+                w = prob .* f[i]
+                for d in 0:dmax
+                    m[i][d + 1, 1] = dot(w, f[1]); m[i][d + 1, 2] = dot(w, f[2])
+                    w = Pt * w
+                end
+            end
+            for (pair, i, j) in PAIRS
+                moment(d) = d >= 0 ? m[i][d + 1, j] : m[j][-d + 1, i]
+                for (lag, value) in expected_multitau(moment, cfg.lengths; window_from=i != j ? 0 : cfg.max_lag / cfg.interval)
+                    push!(rows, (; observable, pair, lag, value=value / (means[i] * means[j])))
+                end
+            end
+        end
+        rows
+    end
+end
+
+"""(lag in frames, expected trace-centred covariance) of the multi-tau estimator, averaged over traces of the given
+lengths, for moments moment(d) = E[x(t) y(t + d)]; lags as multi_tau_corr makes them (lags present in every trace,
+averaged over the traces where the lag has products), sorted. At a lag of k bins of B frames with p products:
+    (average of moment over the bin's frame offsets)  -  centring
+centring = E[(mean of x) (mean of y)], over the n - 2 frames of the estimator's trace means, or, at lags beyond
+window_from frames, over the two windows of the p products. Checked against 100-replicate simulated means of 137
+traces of 216 frames: window centring matches the cross-correlation at every lag (window_from = 0), trace centring
+the autocorrelations out to 60 min, both within about 1 SE; the autocorrelations use window centring beyond the
+scoring range (score_max_lag_min), where it is closer, and are less exact from 60 min on (the estimator is a ratio
+of sums, which these expectations only approximate)."""
+function expected_multitau(moment, lengths; window_from::Real, M::Int=4)
+    totals, counts, lag_lists = Dict{Int,Float64}(), Dict{Int,Int}(), Vector{Int}[]
+    # E[x(bin i) y(bin i + k)] / B^2 for bins of B frames: the average of moment over the frame offsets
+    binned(k, B) = sum((B - abs(o)) * moment(k * B + o) for o in (1 - B):(B - 1)) / B^2
+    for (n, copies) in [(n, count(==(n), lengths)) for n in unique(lengths)]
+        selected = n - 1
+        n1 = n - 2
+        trace_centring = sum((n1 - abs(d - 1)) * moment(d) for d in (2 - n1):n1) / n1^2
+        lags = Int[]
+        function add(lag, B, k, p)                      # lag in frames, bin size, lag in bins, products
+            push!(lags, lag)
+            p >= 1 || return
+            centring = abs(lag) > window_from ? sum((p - abs(d)) * binned(k + d, B) for d in (1 - p):(p - 1)) / p^2 : trace_centring
+            totals[lag] = get(totals, lag, 0.0) + copies * (binned(k, B) - centring)
+            counts[lag] = get(counts, lag, 0) + copies
+        end
+        for sign in (1, -1)
+            for lag in 1:(2 * M)                                       # linear part: lags 1 .. 2M frames
+                add(sign * lag, 1, sign * lag, selected - lag)
+            end
+            points = selected
+            for octave in 1:(Int(idl_round(log2((selected + 1) / M))) - 2)   # binned part: bins of 2^octave frames
+                points = div(points - points % 2, 2)
+                for i in 1:M
+                    add(sign * (M + i) * 2^octave, 2^octave, sign * (M + i), points - (M + i))
+                end
+            end
+        end
+        push!(lag_lists, lags)
+    end
+    common = sort(intersect(lag_lists...))
+    [(lag, haskey(counts, lag) ? totals[lag] / counts[lag] : NaN) for lag in common]
+end
+
 "ON fraction and mean reporter count of each gene, over all recorded frames."
 function on_and_reporters(counts, cfg)
     total(f, gene) = sum(sum(f, view(counts, 1:cfg.lengths[trace], trace, gene)) for trace in axes(counts, 2)) /
@@ -662,8 +766,8 @@ function simulate_replicate(row, model, replicate, cfg)
         cfg.insert_steps == [""] || error("insert_steps needs simulator = \"fast\"")
         Random.seed!(seed)
         counts = simulate_stochasticgene(model, cfg)
-        return [(; curves=correlation_curves(counts, cfg), metrics=on_and_reporters(counts, cfg),
-                   stats=trace_statistics(nothing, nothing, counts, cfg))]
+        return [(; curves=cfg.curves == "theory" ? nothing : correlation_curves(counts, cfg),
+                   metrics=on_and_reporters(counts, cfg), stats=trace_statistics(nothing, nothing, counts, cfg))]
     end
     states = simulate_fast_states(model, cfg, Xoshiro(seed))
     promoter, first = promoter_and_first(model, states)
@@ -675,8 +779,8 @@ function simulate_replicate(row, model, replicate, cfg)
             counts[index, 1] = count_ones(bits_E >> (first_E - 1))
             counts[index, 2] = count_ones(bits_G >> (first_G - 1))
         end
-        (; curves=correlation_curves(counts, cfg), metrics=on_and_reporters(counts, cfg),
-           stats=trace_statistics(promoter, first, counts, cfg))
+        (; curves=cfg.curves == "theory" ? nothing : correlation_curves(counts, cfg),
+           metrics=on_and_reporters(counts, cfg), stats=trace_statistics(promoter, first, counts, cfg))
     end
 end
 
@@ -785,14 +889,22 @@ function run_simulations(rows, cfg, first_id, last_id)
         results[j] = simulate_replicate(rows[jobs[j][1]], models[jobs[j][1]], jobs[j][2], cfg)
     end
 
+    theory = nothing
+    if cfg.curves == "theory"
+        theory = Vector{Any}(undef, length(rows))
+        Threads.@threads :dynamic for i in eachindex(rows)
+            theory[i] = theory_curves(models[i], cfg)
+        end
+    end
     for (v, variant) in enumerate(cfg.insert_steps)
         folder = mkpath(joinpath(cfg.run_dir, "results", isempty(variant) ? "" : "insert$variant"))
-        write_results(rows, models, [result[v] for result in results], cfg, folder, first_id, last_id)
+        write_results(rows, models, [result[v] for result in results], cfg, folder, first_id, last_id,
+                      theory === nothing ? nothing : [t[v] for t in theory])
     end
 end
 
 "Write the curves and metrics of one insert-step variant into `folder`."
-function write_results(rows, models, results, cfg, folder, first_id, last_id)
+function write_results(rows, models, results, cfg, folder, first_id, last_id, theory=nothing)
     stem = @sprintf("%06d-%06d", first_id, last_id)
     curves_path = joinpath(folder, cfg.expanded ? "curves_$stem.f32" : "curves_$stem.csv")
     metrics_path = joinpath(folder, "metrics_$stem.csv")
@@ -805,7 +917,7 @@ function write_results(rows, models, results, cfg, folder, first_id, last_id)
         layout_path = joinpath(folder, "curve_layout.csv")
         open(layout_path * ".tmp.$(getpid())", "w") do io
             println(io, "observable,pair,lag_frames,lag_min")
-            for bin in results[1].curves
+            for bin in (theory === nothing ? results[1].curves : theory[1])
                 println(io, join((bin.observable, bin.pair, bin.lag, fmt(bin.lag * cfg.interval)), ','))
             end
         end
@@ -814,15 +926,22 @@ function write_results(rows, models, results, cfg, folder, first_id, last_id)
     # Write to temporary files first, so that a killed job never leaves a half-written result.
     open(curves_path * ".tmp", "w") do curves_io
         open(metrics_path * ".tmp", "w") do metrics_io
-            cfg.expanded || println(curves_io, "sim_id,observable,pair,lag_frames,lag_min,mean,se," * join(["rep$r" for r in 1:cfg.replicates], ','))
+            reps = theory === nothing ? ["rep$r" for r in 1:cfg.replicates] : String[]      # theory: no replicate columns
+            cfg.expanded || println(curves_io, join(vcat(["sim_id", "observable", "pair", "lag_frames", "lag_min", "mean", "se"], reps), ','))
             println(metrics_io, "sim_id,model_id,on_E,on_E_se,on_G,on_G_se,reporters_E,reporters_E_se," *
                                 "reporters_G,reporters_G_se," * join(vcat(score_names, base_names, replicate_names, "clipped",
                                                                           STAT_NAMES), ','))
             for (i, row) in enumerate(rows)
                 replicates = results[(i - 1) * cfg.replicates .+ (1:cfg.replicates)]
-                bins = replicates[1].curves                                   # same lag bins in every replicate
-                values = hcat([[bin.value for bin in r.curves] for r in replicates]...)
-                means = [mean_se(values[b, :]) for b in eachindex(bins)]
+                if theory === nothing
+                    bins = replicates[1].curves                               # same lag bins in every replicate
+                    values = hcat([[bin.value for bin in r.curves] for r in replicates]...)
+                    means = [mean_se(values[b, :]) for b in eachindex(bins)]
+                else                                                          # the expected curve: SE 0
+                    bins = theory[i]
+                    values = zeros(length(bins), 0)
+                    means = [(bin.value, 0.0) for bin in bins]
+                end
                 if cfg.expanded                                                # mean and SE as 32-bit numbers
                     write(curves_io, Float32[x for b in eachindex(bins) for x in means[b]])
                 else

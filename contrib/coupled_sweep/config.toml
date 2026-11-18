@@ -56,6 +56,9 @@ labelled_pages = true                # also draw the selections with every model
 [simulation]
 simulator = "fast"                   # "fast" or "stochasticgene"
 replicates = 3                       # independent datasets per simulation
+curves = "simulated"                 # "simulated": curves = mean +/- SE over the replicates; "theory": the expected
+                                     # curves, computed exactly from the model (no simulation noise, SE 0); the
+                                     # replicates then only give ON fractions and trace statistics (10 are plenty)
 ntraces = 137                        # traces per dataset
 nframes = 216                        # frames per trace
 interval_min = 1.6666666666666667    # minutes between frames

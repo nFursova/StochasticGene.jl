@@ -29,6 +29,9 @@ Three commands; everything else in this folder is optional.
    `python3 1_generate_models.py config_v5_semi.toml`
 2. Simulate (step 5 and 6 below write and submit the swarm). With `insert_steps = ["11", "13", "33"]` every simulation
    is analysed three ways and written to `results/insert11`, `results/insert13`, `results/insert33`.
+   With `[simulation] curves = "theory"` the curves are computed from the model instead of averaged over simulated
+   replicates: no simulation noise, so the shape selection and the NRMSE do not depend on the number of replicates
+   (the replicates, 10 are plenty, still give the ON fractions, measured folds and co-bursting).
 3. Figures, once per insert variant:
 
 ```bash
@@ -286,4 +289,8 @@ folder: the best architectures, each with its best parameter set (all its parame
 
 - The report shows the mean ± SE over the replicates. Every replicate is kept in `results/curves_*.csv`
   (columns `rep1`, `rep2`, ...) and `results/metrics_*.csv` for your own plots.
+- `curves = "theory"`: the expected value of the same correlation estimator, from the exact moments of the joint
+  chain (`theory_curves` in 3_run_simulations.jl); SE 0 and no replicate columns. Checked against 100-replicate
+  means: the cross-correlation within about 1 SE at every lag, the autocorrelations within about 1 SE out to 60 min
+  and less exactly beyond.
 - If a simulation is in more than one results file (a test job and the swarm, say), the newest file is used.

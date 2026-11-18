@@ -11,8 +11,8 @@ export SG_ROOT=/data/Larsonlab/Nadya/StochasticGene
 : "${SG_PROJECT:?set SG_PROJECT to your StochasticGene project, e.g. /data/fursovan2/sg111}"
 export SG_PROJECT
 
-export SG_SRC_GENE_FOLDER=3and5Prime-stage05-gene-2026-08-25-fixnoise-R-median-continue-24h
-export SG_SRC_ENH_FOLDER=3and5Prime-stage05-enhancer-2026-08-25-fixnoise-R-median-continue-24h
+export SG_SRC_GENE_FOLDER=paper/3and5Prime-stage05-gene-2026-08-25-fixnoise-R-median-continue-24h
+export SG_SRC_ENH_FOLDER=paper/3and5Prime-stage05-enhancer-2026-08-25-fixnoise-R-median-continue-24h
 export SG_SRC_ROW=median
 export SG_MAXTIME=86400          # 24 hours (the continuation adds 72)
 export SG_MEMORY_GB=60
@@ -30,9 +30,9 @@ export SG_ELONG_ENH=20.0
 export SG_ELONG_GENE=5.0
 export SG_INTERVAL=1.6666666666666667
 # hidden-unit models only
-export SG_HIDDEN_RATE0=0.1       # hidden switching rates start at 0.1 per minute ...
+export SG_HIDDEN_RATE0=1.0       # hidden switching rates start at 1 per minute (also their prior mean) ...
 export SG_FIT_HIDDEN=1           # ... and are fitted
-export SG_PRIORCV_HIDDEN=10.0
+export SG_PRIORCV_HIDDEN=1.0     # prior cv as for the G rates of the individual fits
 
 export SG_SAMPLE=3Prime
 export SG_COUPLE_MODE=target

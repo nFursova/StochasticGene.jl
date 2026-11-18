@@ -27,6 +27,7 @@ SG_PROJECT=/data/fursovan2/sg111 bash continue_candidates_72h.sh
 Hidden-unit models (StochasticGene's hidden-latent layout, `unit_model = (1, 2, 3)`): unit 3 has no reporter and
 no noise parameters. H2: hidden states 1 <-> 2, state 2 regulates the given rates of both genes. H3: hidden states
 1 <-> 2 <-> 3, state 1 regulates CCAT1 and state 3 MYC; H3s ties h23 = h21, h32 = h12 and the two genes' gammas of
-each rate; H3a leaves them separate. Hidden rates start at `SG_HIDDEN_RATE0` (0.1 per minute) and are fitted
-(`SG_FIT_HIDDEN=1`) with prior cv `SG_PRIORCV_HIDDEN` (10). In target mode the fitted parameters are the regulated
+each rate; H3a leaves them separate. Hidden rates start at `SG_HIDDEN_RATE0`, which is also their prior mean, and
+are fitted (`SG_FIT_HIDDEN=1`) with prior cv `SG_PRIORCV_HIDDEN` (stager defaults 0.1 per minute and 10;
+stage_candidates_24h.sh uses 1 per minute and 1.0, the cv of the G rates in the individual fits). In target mode the fitted parameters are the regulated
 rates of both genes, the hidden rates and the gammas.
