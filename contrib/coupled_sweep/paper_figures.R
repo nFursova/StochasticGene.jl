@@ -428,11 +428,13 @@ mfold_component <- function(column) {                  # mfold_EG_3R_R23 -> "CCA
 has_stats <- any(grepl("^cob_", names(table)))
 if (!has_stats) message("this run's metrics have no trace statistics (mfold_, cob_): figures 2c and 2d are skipped")
 if (has_stats) {
-  # 2c. Folds measured in the simulations, like in the data
+  # 2c. Folds measured in the simulations, like in the data: each simulation only in the rows of the connections its
+  # architecture has (the components of 2b), so hidden-unit models do not appear here
   columns <- grep("^mfold_", names(selected1), value = TRUE)
-  measured_sims <- do.call(rbind, lapply(columns, function(col) data.frame(
+  measured_sims <- do.call(rbind, lapply(columns, function(col) data.frame(sim_id = selected1$sim_id,
     component = mfold_component(col), fold = as.numeric(selected1[[col]]), group = as.character(selected1$group))))
-  measured_sims <- measured_sims[is.finite(measured_sims$fold) & measured_sims$component %in% measured, ]
+  has_connection <- paste(measured_sims$sim_id, measured_sims$component) %in% paste(sim_folds$sim_id, sim_folds$component)
+  measured_sims <- measured_sims[has_connection & is.finite(measured_sims$fold) & measured_sims$component %in% measured, ]
   rows_c <- intersect(order_components, measured)
   name_c <- function(component) sprintf("%s   (tracks %d)", component, tracks_with_fold[[component]])
   d <- violins(folds_data[folds_data$kind == "experiment", ], rows_c)
@@ -445,7 +447,7 @@ if (has_stats) {
                 width = 0.25, height = 0) +
     scale_fill_manual("hat-shaped\nsimulations", values = GROUP_COLOURS, drop = TRUE) +
     labs(x = NULL, y = "fold measured like in the data (median over tracks; log scale)",
-         title = "Folds per experimental track (blue, | = median) and measured the same way in every hat-shaped simulation (points)")
+         title = "Folds per experimental track (blue, | = median) and measured the same way in the hat-shaped simulations that have the connection (points)")
   save_plot(p2c, "2c_measured_folds_data_vs_simulations", 10, max(3, 0.3 * length(rows_c) + 1.3))
 
   # 2d. Co-bursting: experiment per track, permuted cells, and the hat-shaped simulations by model type
