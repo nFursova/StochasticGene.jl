@@ -54,6 +54,11 @@ args <- commandArgs(trailingOnly = TRUE)
 if (length(args) != 6) stop("usage: Rscript paper_figures.R RUN_DIR INSERT EXPERIMENTAL_CSV CCAT1_PREDICTED MYC_PREDICTED OUTPUT_FOLDER")
 run_dir <- args[1]; insert <- if (args[2] %in% c("", "none", "-")) "" else args[2]; out <- args[6]
 results <- file.path(run_dir, "results", if (nzchar(insert)) paste0("insert", insert) else "")
+if (nzchar(insert) && !dir.exists(results)) {           # a run made without insert steps
+  message("no ", results, ": this run has no insert-step variants; reading ", file.path(run_dir, "results"))
+  insert <- ""
+  results <- file.path(run_dir, "results")
+}
 dir.create(out, recursive = TRUE, showWarnings = FALSE)
 set.seed(SEED)
 GROUP_ORDER <- c("E_to_G", "G_to_E", "reciprocal", "H2", "H3_symmetric", "H3_asymmetric")
@@ -194,9 +199,9 @@ p1 <- ggplot(coupled, aes(center, flanks)) +
   facet_wrap(~group, ncol = 3, labeller = labeller(group = labels)) +
   scale_colour_viridis_c("NRMSE of the\ncross-correlation", trans = "log10", direction = -1) +
   coord_cartesian(xlim = limits(coupled$center, c(exp_hat["center"], 0)), ylim = limits(coupled$flanks, c(exp_hat["flanks"], 0))) +
-  labs(x = sprintf("centre: mean cross-correlation within ±%g min", CENTER_MIN),
+  labs(x = sprintf("centre: mean cross-correlation within +/-%g min", CENTER_MIN),
        y = sprintf("flanks: mean from %g to %g min, both sides", FLANKS_MIN[1], FLANKS_MIN[2]),
-       title = sprintf("Cross-correlation shape (insert %s). Shaded: centre ≥ %g and flanks ≤ %g. X = experiment, ◇ = uncoupled",
+       title = sprintf("Cross-correlation shape (insert %s). Shaded: centre >= %g and flanks <= %g. X = experiment, diamond = uncoupled",
                        insert, CENTER_AT_LEAST, FLANKS_AT_MOST)) +
   theme_classic(base_size = 9) + theme(strip.background = element_blank(), plot.title = element_text(size = 9, face = "bold"))
 save_plot(p1, "1_shape_map", 11, 7)
@@ -465,6 +470,7 @@ if (nrow(selected2)) {
     d[!duplicated(d[, c("sim_id", "lag_min")]), ]
   }
   variants <- if (nzchar(insert)) c("11", "13", "33") else ""
+  variants <- variants[dir.exists(file.path(run_dir, "results", ifelse(nzchar(variants), paste0("insert", variants), "")))]
   sim_curves <- do.call(rbind, lapply(variants, function(v) {
     d <- read_top(file.path(run_dir, "results", if (nzchar(v)) paste0("insert", v) else ""))
     if (is.null(d)) NULL else cbind(d, insert = if (nzchar(v)) v else "all positions")
@@ -491,7 +497,7 @@ if (nrow(selected2)) {
       scale_colour_manual("insert step\n(CCAT1, MYC)", values = colours) +
       scale_fill_manual("insert step\n(CCAT1, MYC)", values = colours) +
       labs(x = "lag (min); positive = MYC after CCAT1", y = "cross-correlation (reporter count)",
-           title = sprintf("Selection 2: %d architectures in ranking order (insert %s), page %d of %d: experiment (black, ± SE), simulation (mean ± SE)",
+           title = sprintf("Selection 2: %d architectures in ranking order (insert %s), page %d of %d: experiment (black, +/- SE), simulation (mean +/- SE)",
                            nrow(top), if (nzchar(insert)) insert else "all positions", k, length(pages))) +
       theme_classic(base_size = 7) + theme(strip.background = element_blank(), strip.text = element_text(size = 6),
                                            plot.title = element_text(size = 8.5, face = "bold"))
