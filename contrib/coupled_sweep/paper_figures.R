@@ -334,10 +334,10 @@ order_components <- as.vector(t(outer(c("CCAT1", "MYC"), as.vector(outer(SOURCES
 })))
 used <- count_components(table)
 hat_used <- table(sim_folds$component)
-label <- function(component) {
+label <- function(component, counts = hat_used, word = "hat-shaped") {
   tracks <- if (component %in% names(tracks_with_fold)) tracks_with_fold[[component]] else 0
-  sprintf("%s   (tracks %d; hat-shaped %s of %s)", component, tracks,
-          format(if (component %in% names(hat_used)) hat_used[[component]] else 0, big.mark = ","),
+  sprintf("%s   (tracks %d; %s %s of %s)", component, tracks, word,
+          format(if (component %in% names(counts)) counts[[component]] else 0, big.mark = ","),
           format(if (component %in% names(used)) used[[component]] else 0, big.mark = ","))
 }
 violins <- function(d, rows) {                         # at most 20,000 values per violin, rows as labelled factor
@@ -364,23 +364,29 @@ p2a <- ggplot(data_a, aes(component, fold)) + fold_axis +
                        N_NULL))
 save_plot(p2a, "2a_folds_data_vs_permuted", 10, max(3, 0.3 * length(rows_a) + 1.3))
 
-# 2b. Experiment against the folds of the hat-shaped simulations
-rows_b <- intersect(order_components, unique(c(measured, as.character(sim_folds$component))))
-data_b <- violins(folds_data[folds_data$kind == "experiment", ], intersect(rows_b, measured))
-data_b$component <- factor(as.character(data_b$component), levels = vapply(rev(rows_b), label, ""))
-points_b <- sim_folds[sim_folds$component %in% rows_b, ]
-points_b$component <- factor(vapply(as.character(points_b$component), label, ""), levels = vapply(rev(rows_b), label, ""))
-medians_b <- if (nrow(data_b)) aggregate(fold ~ component, data_b, median) else data_b
-p2b <- ggplot(data_b, aes(component, fold)) + fold_axis +
-  geom_violin(colour = "#2a78d6", fill = NA, scale = "width", width = 0.8, linewidth = 0.4) +
-  geom_point(data = medians_b, colour = "#2a78d6", shape = 124, size = 3.5) +
-  geom_jitter(data = points_b, aes(fill = group), shape = 21, colour = "white", stroke = 0.15, size = 1.8, alpha = 0.8,
-              width = 0.25, height = 0) +
-  scale_x_discrete(drop = FALSE) +
-  scale_fill_manual("hat-shaped\nsimulations", values = GROUP_COLOURS, drop = TRUE) +
-  labs(x = NULL, y = "fold: rate while the source condition holds / rate otherwise (log scale)",
-       title = "Folds per experimental track (blue violin, | = median) and the folds the hat-shaped simulations use (points)")
-save_plot(p2b, "2b_folds_data_vs_simulations", 10, max(3, 0.3 * length(rows_b) + 1.3))
+# 2b (and 4b after selection 2). Experiment against the folds of the selected simulations (points)
+folds_figure <- function(points, word, legend, title, name) {
+  counts <- table(as.character(points$component))
+  name_of <- function(component) label(component, counts, word)
+  rows <- intersect(order_components, unique(c(measured, as.character(points$component))))
+  d <- violins(folds_data[folds_data$kind == "experiment", ], intersect(rows, measured))
+  d$component <- factor(vapply(sub("   \\(tracks.*$", "", as.character(d$component)), name_of, ""), levels = vapply(rev(rows), name_of, ""))
+  points <- points[points$component %in% rows, ]
+  points$component <- factor(vapply(as.character(points$component), name_of, ""), levels = vapply(rev(rows), name_of, ""))
+  medians <- if (nrow(d)) aggregate(fold ~ component, d, median) else d
+  plot <- ggplot(d, aes(component, fold)) + fold_axis +
+    geom_violin(colour = "#2a78d6", fill = NA, scale = "width", width = 0.8, linewidth = 0.4) +
+    geom_point(data = medians, colour = "#2a78d6", shape = 124, size = 3.5) +
+    geom_jitter(data = points, aes(fill = group), shape = 21, colour = "white", stroke = 0.15, size = 1.8, alpha = 0.8,
+                width = 0.25, height = 0) +
+    scale_x_discrete(drop = FALSE) +
+    scale_fill_manual(legend, values = GROUP_COLOURS, drop = TRUE) +
+    labs(x = NULL, y = "fold: rate while the source condition holds / rate otherwise (log scale)", title = title)
+  save_plot(plot, name, 10, max(3, 0.3 * length(rows) + 1.3))
+}
+folds_figure(sim_folds, "hat-shaped", "hat-shaped\nsimulations",
+             "Folds per experimental track (blue violin, | = median) and the folds the hat-shaped simulations use (points)",
+             "2b_folds_data_vs_simulations")
 
 # ---------------------------------------------------------------------------
 # 3 and 4. Heatmaps of selection 1 and selection 2
@@ -395,6 +401,10 @@ selected2 <- selected1[!(selected1$sim_id %in% outside), ]
 selected1$selection2 <- !(selected1$sim_id %in% outside)
 write.csv(selected1, file.path(out, "3_selection1_hat_shape.csv"), row.names = FALSE)
 write.csv(selected2, file.path(out, "4_selection2_folds_in_data_range.csv"), row.names = FALSE)
+folds_figure(sim_folds[sim_folds$sim_id %in% selected2$sim_id, ], "in selection 2", "selection 2\nsimulations",
+             sprintf("Folds per experimental track (blue, | = median) and of the selection 2 simulations (points; middle %g%% of tracks)",
+                     100 * diff(DATA_RANGE)),
+             "4b_folds_data_vs_selection2")
 
 heatmap <- function(selected, title) {
   if (!nrow(selected)) return(ggplot() + annotate("text", x = 0, y = 0, label = "no simulations") + theme_void())

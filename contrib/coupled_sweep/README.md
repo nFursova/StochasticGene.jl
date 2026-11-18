@@ -44,7 +44,7 @@ shape = selection 1), `2a_folds_data_vs_permuted` (for every CCAT1-MYC connectio
 track, estimated with the model's form, rate x (1 + (fold - 1) x n) with n = number of reporters for R and
 1 + reporters in state 3 for 3+R, blue, against tracks paired with another cell, 1,000 permutations, grey),
 `2b_folds_data_vs_simulations` (the same blue violins with the folds of the hat-shaped simulations as points; row
-labels give the number of tracks and how many simulations use the connection and are hat-shaped), `3_heatmap_selection1`, `4_heatmap_selection2` (selection 1 with every
+labels give the number of tracks and how many simulations use the connection and are hat-shaped), `3_heatmap_selection1`, `4_heatmap_selection2` and `4b_folds_data_vs_selection2` (as 2b, points = selection 2 only; selection 1 with every
 fold inside the middle 50% of the experimental tracks' folds; hidden-unit models have no observable fold and stay),
 and `5_ranking` with `5_candidates_to_fit.csv` (best parameter set per architecture of selection 2, ranked by NRMSE;
 candidates = top 25%), and `6_selection2_architectures_insert_steps` (every architecture of selection 2, in ranking order, 24 per
