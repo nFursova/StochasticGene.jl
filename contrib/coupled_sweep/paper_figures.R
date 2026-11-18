@@ -2,8 +2,9 @@
 # Paper figures from a simulation run (after 3_run_simulations.jl), in five steps:
 #   1. Shape map: every simulation's cross-correlation centre against its flanks, one panel per model type,
 #      coloured by NRMSE; the shaded area = a Mexican-hat shape (selection 1).
-#   2. Folds: for every connection (e.g. CCAT1 state 2 -> MYC R23), the fold in each experimental track (cell),
-#      against circularly shifted and permuted tracks, and the folds of the simulations in selection 1.
+#   2. Folds: for every connection (e.g. CCAT1 state 2 -> MYC R23), the fold in each experimental track (cell)
+#      2a: against tracks paired with another cell (permuted: the relationship expected by chance);
+#      2b: against the folds the simulations in selection 1 use (points).
 #   3. Heatmap of every simulation in selection 1, by model type.
 #   4. Heatmap of selection 2: selection 1, keeping only simulations whose every CCAT1-MYC fold lies within the
 #      middle DATA_RANGE of the experimental per-track folds of that connection (hidden-unit models have no
@@ -36,7 +37,9 @@ CENTER_AT_LEAST <- 0.01         # selection 1: centre >= this ...
 FLANKS_AT_MOST  <- -0.01        # ... and flanks <= this (the shaded area)
 DATA_RANGE    <- c(0.25, 0.75)  # selection 2: quantiles of the per-track folds a simulated fold must lie between
 MIN_FRAMES    <- 5              # per track: frames needed in and out of the condition to compute a fold
-N_NULL        <- 1000           # circular shifts and permutations
+N_NULL        <- 1000           # permutations: each track paired with another cell's track, this many times
+MIN_TRACKS    <- 5              # a connection's experimental distribution is drawn (and used in selection 2) only
+                                # with at least this many tracks that have a fold
 RANK_BY       <- "xcor"         # "xcor" = NRMSE of the cross-correlation; "mean3" = mean NRMSE of it and both autocorrelations
 TOP_FRACTION  <- 0.25           # candidates: the best this fraction of architectures in selection 2 ...
 NRMSE_CUTOFF  <- NA             # ... or, if a number, every architecture with NRMSE below it
@@ -253,30 +256,29 @@ for (direction in c("EG", "GE")) {
   C <- lapply(seq_len(ntracks), function(i) conditions(source[[i]], n[i]))
   R <- lapply(seq_len(ntracks), function(i) rates(target[[i]], n[i]))
   fold_rows[[length(fold_rows) + 1]] <- as_rows(lapply(seq_len(ntracks), function(i) track_fold(C[[i]], R[[i]])), direction, "experiment")
-  shifted <- list(); permuted <- list()
+  permuted <- list()
   for (b in seq_len(N_NULL)) {
-    for (i in seq_len(ntracks)) {
-      m <- n[i] - 1                                   # circular shift of the source track within its own cell
-      o <- sample.int(m - 1, 1)
-      shifted[[length(shifted) + 1]] <- track_fold(C[[i]][c((o + 1):m, seq_len(o)), , drop = FALSE], R[[i]])
-      j <- sample(setdiff(seq_len(ntracks), i), 1)  # the source track of another cell
+    for (i in seq_len(ntracks)) {                     # the source track of another cell
+      j <- sample(setdiff(seq_len(ntracks), i), 1)
       len <- min(n[i], n[j])
       Rj <- lapply(R[[i]], function(x) x[seq_len(len - 1), , drop = FALSE])
       permuted[[length(permuted) + 1]] <- track_fold(conditions(source[[j]], len), Rj)
     }
   }
-  fold_rows[[length(fold_rows) + 1]] <- as_rows(shifted, direction, "circular shift")
   fold_rows[[length(fold_rows) + 1]] <- as_rows(permuted, direction, "permuted cells")
 }
 folds_data <- do.call(rbind, fold_rows)
 folds_data <- folds_data[is.finite(folds_data$fold) & folds_data$fold > 0, ]
+tracks_with_fold <- table(folds_data$component[folds_data$kind == "experiment"])
+measured <- names(tracks_with_fold)[tracks_with_fold >= MIN_TRACKS]   # connections with an experimental distribution
 data_summary <- do.call(rbind, lapply(split(folds_data, list(folds_data$component, folds_data$kind), drop = TRUE), function(d) {
   q <- quantile(d$fold, c(0.025, DATA_RANGE, 0.5, 0.975))
   data.frame(component = d$component[1], kind = d$kind[1], values = nrow(d), median = q[4], low = q[2], high = q[3],
              q025 = q[1], q975 = q[5])
 }))
 write.csv(data_summary, file.path(out, "2_data_folds.csv"), row.names = FALSE)
-range_of <- with(data_summary[data_summary$kind == "experiment", ], setNames(Map(c, low, high), component))
+range_of <- with(data_summary[data_summary$kind == "experiment" & data_summary$component %in% measured, ],
+                 setNames(Map(c, low, high), component))
 
 # Folds of the hat-shaped simulations, one row per simulation and connection component
 components_of <- function(row) {
@@ -294,6 +296,23 @@ components_of <- function(row) {
   }
   if (length(rows)) do.call(rbind, rows) else NULL
 }
+# How many simulations (of the whole run) use each connection component
+count_components <- function(tab) {
+  counts <- setNames(numeric(0), character(0))
+  for (edge in c("EG", "GE")) {
+    state <- tab[[paste0(edge, "_state")]]; set <- tab[[paste0(edge, "_rates")]]
+    ok <- !is.na(set) & nzchar(set) & tab$group != "uncoupled" & !grepl("gamma0", tab$model_id)
+    combos <- table(paste(state[ok], set[ok], sep = "|"))
+    for (k in names(combos)) {
+      parts <- strsplit(k, "|", fixed = TRUE)[[1]]
+      for (rate in strsplit(parts[2], "+", fixed = TRUE)[[1]]) {
+        name <- sprintf("%s %s -> %s %s", GENE[substr(edge, 1, 1)], parts[1], GENE[substr(edge, 2, 2)], rate)
+        counts[name] <- sum(counts[name], combos[[k]], na.rm = TRUE)
+      }
+    }
+  }
+  counts
+}
 selected1 <- table[table$hat_shape, ]
 sim_folds <- do.call(rbind, lapply(seq_len(nrow(selected1)), function(i) components_of(selected1[i, ])))
 if (is.null(sim_folds)) sim_folds <- data.frame(sim_id = character(), model_id = character(), group = character(), component = character(), fold = numeric())
@@ -303,28 +322,55 @@ order_components <- as.vector(t(outer(c("CCAT1", "MYC"), as.vector(outer(SOURCES
   parts <- strsplit(sr, " ", fixed = TRUE)
   vapply(seq_along(g), function(k) sprintf("%s %s -> %s %s", g[k], parts[[k]][1], ifelse(g[k] == "CCAT1", "MYC", "CCAT1"), parts[[k]][2]), "")
 })))
-shown <- intersect(order_components, unique(c(folds_data$component, sim_folds$component)))
-plot_data <- folds_data[folds_data$component %in% shown, ]
-plot_data <- do.call(rbind, lapply(split(plot_data, list(plot_data$component, plot_data$kind), drop = TRUE),
-                                   function(d) if (nrow(d) > 20000) d[sample.int(nrow(d), 20000), ] else d))
-plot_data$component <- factor(plot_data$component, levels = rev(shown))
-plot_data$kind <- factor(plot_data$kind, levels = c("permuted cells", "circular shift", "experiment"))
-sim_folds$component <- factor(sim_folds$component, levels = rev(shown))
-medians <- aggregate(fold ~ component + kind, plot_data, median)
-p2 <- ggplot(plot_data, aes(component, fold)) +
-  geom_hline(yintercept = 1, colour = "grey50", linewidth = 0.3) +
-  geom_violin(aes(colour = kind), fill = NA, position = position_dodge(width = 0.85), scale = "width", width = 0.8, linewidth = 0.35) +
-  geom_point(data = medians, aes(colour = kind), position = position_dodge(width = 0.85), shape = 124, size = 3) +
-  geom_jitter(data = sim_folds, aes(fill = group), shape = 21, colour = "white", stroke = 0.15, size = 1.8, alpha = 0.8,
-              width = 0.3, height = 0) +
-  scale_colour_manual(NULL, values = c(experiment = "#2a78d6", `circular shift` = "grey75", `permuted cells` = "grey40"),
-                      breaks = c("experiment", "circular shift", "permuted cells")) +
-  scale_fill_manual("hat-shaped\nsimulations", values = GROUP_COLOURS, drop = TRUE) +
-  scale_y_log10() + coord_flip() +
+used <- count_components(table)
+hat_used <- table(sim_folds$component)
+label <- function(component) {
+  tracks <- if (component %in% names(tracks_with_fold)) tracks_with_fold[[component]] else 0
+  sprintf("%s   (tracks %d; hat-shaped %s of %s)", component, tracks,
+          format(if (component %in% names(hat_used)) hat_used[[component]] else 0, big.mark = ","),
+          format(if (component %in% names(used)) used[[component]] else 0, big.mark = ","))
+}
+violins <- function(d, rows) {                         # at most 20,000 values per violin, rows as labelled factor
+  d <- d[d$component %in% rows, ]
+  d <- do.call(rbind, lapply(split(d, list(d$component, d$kind), drop = TRUE),
+                             function(x) if (nrow(x) > 20000) x[sample.int(nrow(x), 20000), ] else x))
+  d$component <- factor(d$component, levels = rev(rows), labels = vapply(rev(rows), label, ""))
+  d
+}
+fold_axis <- list(geom_hline(yintercept = 1, colour = "grey50", linewidth = 0.3), scale_y_log10(), coord_flip(),
+                  theme_classic(base_size = 8), theme(plot.title = element_text(size = 8.5, face = "bold")))
+
+# 2a. Experiment against permuted cells, for the connections with an experimental distribution
+rows_a <- intersect(order_components, measured)
+data_a <- violins(folds_data, rows_a)
+data_a$kind <- factor(data_a$kind, levels = c("permuted cells", "experiment"))
+medians_a <- aggregate(fold ~ component + kind, data_a, median)
+p2a <- ggplot(data_a, aes(component, fold)) + fold_axis +
+  geom_violin(aes(colour = kind), fill = NA, position = position_dodge(width = 0.8), scale = "width", width = 0.75, linewidth = 0.35) +
+  geom_point(data = medians_a, aes(colour = kind), position = position_dodge(width = 0.8), shape = 124, size = 3) +
+  scale_colour_manual(NULL, values = c(experiment = "#2a78d6", `permuted cells` = "grey55"), breaks = c("experiment", "permuted cells")) +
   labs(x = NULL, y = "fold: rate while the source condition holds / rate otherwise (log scale)",
-       title = "Folds per experimental track (blue) and with the pairing broken (grey), against the folds the hat-shaped simulations use (points)") +
-  theme_classic(base_size = 8) + theme(plot.title = element_text(size = 8.5, face = "bold"))
-save_plot(p2, "2_folds_data_vs_simulations", 10, max(4, 0.32 * length(shown) + 1.5))
+       title = sprintf("Folds per experimental track (blue) and with each track paired with another cell (grey, %d permutations); | = median",
+                       N_NULL))
+save_plot(p2a, "2a_folds_data_vs_permuted", 10, max(3, 0.3 * length(rows_a) + 1.3))
+
+# 2b. Experiment against the folds of the hat-shaped simulations
+rows_b <- intersect(order_components, unique(c(measured, as.character(sim_folds$component))))
+data_b <- violins(folds_data[folds_data$kind == "experiment", ], intersect(rows_b, measured))
+data_b$component <- factor(as.character(data_b$component), levels = vapply(rev(rows_b), label, ""))
+points_b <- sim_folds[sim_folds$component %in% rows_b, ]
+points_b$component <- factor(vapply(as.character(points_b$component), label, ""), levels = vapply(rev(rows_b), label, ""))
+medians_b <- if (nrow(data_b)) aggregate(fold ~ component, data_b, median) else data_b
+p2b <- ggplot(data_b, aes(component, fold)) + fold_axis +
+  geom_violin(colour = "#2a78d6", fill = NA, scale = "width", width = 0.8, linewidth = 0.4) +
+  geom_point(data = medians_b, colour = "#2a78d6", shape = 124, size = 3.5) +
+  geom_jitter(data = points_b, aes(fill = group), shape = 21, colour = "white", stroke = 0.15, size = 1.8, alpha = 0.8,
+              width = 0.25, height = 0) +
+  scale_x_discrete(drop = FALSE) +
+  scale_fill_manual("hat-shaped\nsimulations", values = GROUP_COLOURS, drop = TRUE) +
+  labs(x = NULL, y = "fold: rate while the source condition holds / rate otherwise (log scale)",
+       title = "Folds per experimental track (blue violin, | = median) and the folds the hat-shaped simulations use (points)")
+save_plot(p2b, "2b_folds_data_vs_simulations", 10, max(3, 0.3 * length(rows_b) + 1.3))
 
 # ---------------------------------------------------------------------------
 # 3 and 4. Heatmaps of selection 1 and selection 2
