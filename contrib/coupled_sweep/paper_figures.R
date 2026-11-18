@@ -9,6 +9,8 @@
 #      middle DATA_RANGE of the experimental per-track folds of that connection (hidden-unit models have no
 #      observable fold and are kept).
 #   5. Ranking of the architectures in selection 2 by NRMSE (best parameter set of each), and the candidate list.
+#   6. The TOP_CURVES best architectures of the ranking: the experimental cross-correlation and the simulated one
+#      (mean +/- SE over replicates) of their best parameter set, analysed with insert steps 11, 13 and 33.
 #
 #   Rscript paper_figures.R RUN_DIR INSERT EXPERIMENTAL_CSV CCAT1_PREDICTED.csv MYC_PREDICTED.csv OUTPUT_FOLDER
 #   e.g. Rscript paper_figures.R runs/semi_extensive_insert_steps 11 data/experimental.csv \
@@ -34,6 +36,8 @@ RANK_BY       <- "xcor"         # "xcor" = NRMSE of the cross-correlation; "mean
 TOP_FRACTION  <- 0.25           # candidates: the best this fraction of architectures in selection 2 ...
 NRMSE_CUTOFF  <- NA             # ... or, if a number, every architecture with NRMSE below it
 HEATMAP_LAG   <- 120            # heatmap lag range, minutes
+TOP_CURVES    <- 20             # figure 6: this many best architectures
+INSERT_COLOURS <- c(`11` = "#2a78d6", `13` = "#eb6834", `33` = "#1baf7a")   # figure 6: insert-step variants
 SEED          <- 20261118
 
 args <- commandArgs(trailingOnly = TRUE)
@@ -330,6 +334,51 @@ if (nrow(selected2)) {
                                    if (is.na(NRMSE_CUTOFF)) sprintf("top %g%%", 100 * TOP_FRACTION) else sprintf("NRMSE < %g", NRMSE_CUTOFF))) +
     theme_classic(base_size = 7) + theme(plot.title = element_text(size = 8.5, face = "bold"))
   save_plot(p5, "5_ranking", 9, max(3, 0.13 * nrow(best) + 1.2))
+
+  # 6. Top architectures: experiment and simulation, with the reporter at insert steps 11, 13 and 33
+  top <- head(best[order(best$rank), ], TOP_CURVES)
+  ids <- as.integer(top$sim_id)
+  read_top <- function(folder) {                       # mean and SE of the cross-correlation of the top simulations
+    files <- list.files(folder, pattern = "^curves_[0-9]+-[0-9]+\\.csv$", full.names = TRUE)
+    bounds <- do.call(rbind, lapply(strsplit(sub("^curves_([0-9]+)-([0-9]+)\\.csv$", "\\1 \\2", basename(files)), " "), as.integer))
+    files <- files[vapply(seq_along(files), function(i) any(ids >= bounds[i, 1] & ids <= bounds[i, 2]), TRUE)]
+    files <- files[order(file.mtime(files), decreasing = TRUE)]
+    if (!length(files)) return(NULL)
+    d <- do.call(rbind, lapply(files, function(f) {
+      header <- names(read.csv(f, nrows = 1))
+      part <- read.csv(f, colClasses = ifelse(grepl("^rep", header), "NULL", NA))
+      part[part$observable == "reporter" & part$pair == "EG" & part$sim_id %in% ids, c("sim_id", "lag_min", "mean", "se")]
+    }))
+    d$lag_min <- round(d$lag_min, 2)
+    d[!duplicated(d[, c("sim_id", "lag_min")]), ]
+  }
+  variants <- if (nzchar(insert)) c("11", "13", "33") else ""
+  sim_curves <- do.call(rbind, lapply(variants, function(v) {
+    d <- read_top(file.path(run_dir, "results", if (nzchar(v)) paste0("insert", v) else ""))
+    if (is.null(d)) NULL else cbind(d, insert = if (nzchar(v)) v else "all positions")
+  }))
+  panel <- setNames(sprintf("%d. %s", top$rank, gsub("__", " ", top$model_id)), top$sim_id)
+  sim_curves <- sim_curves[abs(sim_curves$lag_min) <= HEATMAP_LAG, ]
+  sim_curves$panel <- factor(panel[as.character(sim_curves$sim_id)], levels = panel)
+  e <- exp_eg[abs(exp_eg$lag_min) <= HEATMAP_LAG, ]
+  e <- do.call(rbind, lapply(panel, function(p) cbind(e[, c("lag_min", "mean", "se")], panel = p)))
+  e$panel <- factor(e$panel, levels = panel)
+  colours <- if (nzchar(insert)) INSERT_COLOURS else c(`all positions` = "#2a78d6")
+  p6 <- ggplot(sim_curves, aes(lag_min, mean)) +
+    geom_hline(yintercept = 0, colour = "grey70", linewidth = 0.3) +
+    geom_ribbon(data = e, aes(ymin = mean - se, ymax = mean + se), fill = "grey80") +
+    geom_line(data = e, colour = "black", linewidth = 0.5) +
+    geom_ribbon(aes(ymin = mean - se, ymax = mean + se, fill = insert), alpha = 0.2) +
+    geom_line(aes(colour = insert), linewidth = 0.5) +
+    facet_wrap(~panel, ncol = 4, labeller = label_wrap_gen(38)) +
+    scale_colour_manual("insert step\n(CCAT1, MYC)", values = colours) +
+    scale_fill_manual("insert step\n(CCAT1, MYC)", values = colours) +
+    labs(x = "lag (min); positive = MYC after CCAT1", y = "cross-correlation (reporter count)",
+         title = sprintf("The %d best architectures (ranked with insert %s): experiment (black, \u00b1 SE) and simulation (mean \u00b1 SE over replicates)",
+                         nrow(top), if (nzchar(insert)) insert else "all positions")) +
+    theme_classic(base_size = 7) + theme(strip.background = element_blank(), strip.text = element_text(size = 6),
+                                         plot.title = element_text(size = 8.5, face = "bold"))
+  save_plot(p6, "6_top_architectures_insert_steps", 11, 1.9 * ceiling(nrow(top) / 4) + 1)
 }
 cat(sprintf("Selection 1 (hat shape): %d simulations, %d architectures\n", nrow(selected1), length(unique(selected1$model_id))))
 cat(sprintf("Selection 2 (folds within the data's middle %g%%): %d simulations, %d architectures\n",
