@@ -4,7 +4,12 @@
 #      coloured by NRMSE; the shaded area = a Mexican-hat shape (selection 1).
 #   2. Folds: for every connection (e.g. CCAT1 state 2 -> MYC R23), the fold in each experimental track (cell)
 #      2a: against tracks paired with another cell (permuted: the relationship expected by chance);
-#      2b: against the folds the simulations in selection 1 use (points).
+#      2b: against the folds the simulations in selection 1 use (points);
+#      2c: against the folds MEASURED in the simulations in selection 1, the same way as in the data (every model,
+#          hidden-unit models too; needs runs whose metrics have mfold_ columns);
+#      2d: co-bursting: MYC burst onsets while CCAT1 has reporters / otherwise, the reverse, and co-ON enrichment
+#          P(both ON) / (P(CCAT1 ON) P(MYC ON)): experiment per track, permuted cells, and the simulations in
+#          selection 1 by model type (needs cob_ columns).
 #   3. Heatmap of every simulation in selection 1, by model type.
 #   4. Heatmap of selection 2: selection 1, keeping only simulations whose every CCAT1-MYC fold lies within the
 #      middle DATA_RANGE of the experimental per-track folds of that connection (hidden-unit models have no
@@ -161,7 +166,7 @@ metric_files <- list.files(results, pattern = "^metrics_.*\\.csv$", full.names =
 if (!length(metric_files)) stop("no metrics files in ", results)
 metric_files <- metric_files[order(file.mtime(metric_files), decreasing = TRUE)]
 wanted <- c("sim_id", "nrmse_reporter_EG", "nrmse_reporter_EE", "nrmse_reporter_GG", "on_E", "on_G")
-metrics <- do.call(rbind, lapply(metric_files, read_cols, keep = function(h) h %in% wanted))
+metrics <- do.call(rbind, lapply(metric_files, read_cols, keep = function(h) h %in% wanted | grepl("^mfold_|^cob_", h)))
 metrics <- metrics[!duplicated(metrics$sim_id), ]
 read <- read_shapes(results)
 eg <- read$eg
@@ -384,6 +389,89 @@ folds_figure <- function(points, word, legend, title, name) {
     labs(x = NULL, y = "fold: rate while the source condition holds / rate otherwise (log scale)", title = title)
   save_plot(plot, name, 10, max(3, 0.3 * length(rows) + 1.3))
 }
+# Co-bursting of one track pair (reporter counts of CCAT1 and MYC), as 3_run_simulations.jl computes it.
+cobursting <- function(e, g) {
+  n <- min(length(e), length(g)); e <- e[seq_len(n)]; g <- g[seq_len(n)]
+  onset <- function(target, cond) {                     # onsets of target while cond has reporters / otherwise
+    t <- seq_len(n - 1)
+    risk <- target[t] == 0; event <- risk & target[t + 1] > 0; on <- cond[t] > 0
+    T1 <- sum(risk & on); k1 <- sum(event & on); T0 <- sum(risk & !on); k0 <- sum(event & !on)
+    if (T1 < MIN_FRAMES || T0 < MIN_FRAMES || k1 + k0 == 0) NA else ((k1 + 0.5) / T1) / ((k0 + 0.5) / T0)
+  }
+  onE <- sum(e > 0); onG <- sum(g > 0); both <- sum(e > 0 & g > 0)
+  c(cob_onset_G_given_E = onset(g, e), cob_onset_E_given_G = onset(e, g),
+    cob_coON = if (onE > 0 && onG > 0) (both + 0.5) * n / ((onE + 0.5) * (onG + 0.5)) else NA)
+}
+COB_NAMES <- c(cob_onset_G_given_E = "MYC burst onsets: CCAT1 ON / OFF", cob_onset_E_given_G = "CCAT1 burst onsets: MYC ON / OFF",
+               cob_coON = "co-ON: P(both ON) / (P(CCAT1 ON) P(MYC ON))")
+mfold_component <- function(column) {                  # mfold_EG_3R_R23 -> "CCAT1 3+R -> MYC R23"
+  parts <- strsplit(sub("^mfold_", "", column), "_", fixed = TRUE)[[1]]
+  sprintf("%s %s -> %s %s", GENE[substr(parts[1], 1, 1)], sub("^3R$", "3+R", parts[2]), GENE[substr(parts[1], 2, 2)], parts[3])
+}
+has_stats <- any(grepl("^cob_", names(table)))
+if (!has_stats) message("this run's metrics have no trace statistics (mfold_, cob_): figures 2c and 2d are skipped")
+if (has_stats) {
+  # 2c. Folds measured in the simulations, like in the data
+  columns <- grep("^mfold_", names(selected1), value = TRUE)
+  measured_sims <- do.call(rbind, lapply(columns, function(col) data.frame(
+    component = mfold_component(col), fold = as.numeric(selected1[[col]]), group = as.character(selected1$group))))
+  measured_sims <- measured_sims[is.finite(measured_sims$fold) & measured_sims$component %in% measured, ]
+  rows_c <- intersect(order_components, measured)
+  name_c <- function(component) sprintf("%s   (tracks %d)", component, tracks_with_fold[[component]])
+  d <- violins(folds_data[folds_data$kind == "experiment", ], rows_c)
+  d$component <- factor(vapply(sub("   \\(tracks.*$", "", as.character(d$component)), name_c, ""), levels = vapply(rev(rows_c), name_c, ""))
+  measured_sims$component <- factor(vapply(measured_sims$component, name_c, ""), levels = vapply(rev(rows_c), name_c, ""))
+  p2c <- ggplot(d, aes(component, fold)) + fold_axis +
+    geom_violin(colour = "#2a78d6", fill = NA, scale = "width", width = 0.8, linewidth = 0.4) +
+    geom_point(data = aggregate(fold ~ component, d, median), colour = "#2a78d6", shape = 124, size = 3.5) +
+    geom_jitter(data = measured_sims, aes(fill = group), shape = 21, colour = "white", stroke = 0.15, size = 1.5, alpha = 0.6,
+                width = 0.25, height = 0) +
+    scale_fill_manual("hat-shaped\nsimulations", values = GROUP_COLOURS, drop = TRUE) +
+    labs(x = NULL, y = "fold measured like in the data (median over tracks; log scale)",
+         title = "Folds per experimental track (blue, | = median) and measured the same way in every hat-shaped simulation (points)")
+  save_plot(p2c, "2c_measured_folds_data_vs_simulations", 10, max(3, 0.3 * length(rows_c) + 1.3))
+
+  # 2d. Co-bursting: experiment per track, permuted cells, and the hat-shaped simulations by model type
+  experiment_cob <- do.call(rbind, lapply(seq_len(ntracks), function(i) cobursting(tracks$E[[i]]$reporters, tracks$G[[i]]$reporters)))
+  permuted_cob <- do.call(rbind, lapply(seq_len(N_NULL), function(b) do.call(rbind, lapply(seq_len(ntracks), function(i)
+    cobursting(tracks$E[[i]]$reporters, tracks$G[[sample(setdiff(seq_len(ntracks), i), 1)]]$reporters)))))
+  long <- function(m, kind) do.call(rbind, lapply(colnames(m), function(k) data.frame(statistic = k, value = m[, k], kind = kind)))
+  cob <- rbind(long(experiment_cob, "experiment"), long(permuted_cob, "permuted cells"))
+  cob <- cob[is.finite(cob$value) & cob$value > 0, ]
+  write.csv(do.call(rbind, lapply(split(cob, list(cob$statistic, cob$kind), drop = TRUE), function(x) data.frame(
+    statistic = x$statistic[1], kind = x$kind[1], tracks = nrow(x), median = median(x$value),
+    q25 = quantile(x$value, 0.25), q75 = quantile(x$value, 0.75)))), file.path(out, "2d_cobursting_data.csv"), row.names = FALSE)
+  sims_cob <- do.call(rbind, lapply(names(COB_NAMES), function(k) data.frame(
+    statistic = k, value = as.numeric(selected1[[k]]), kind = as.character(selected1$group))))
+  sims_cob <- sims_cob[is.finite(sims_cob$value) & sims_cob$value > 0, ]
+  write.csv(sims_cob, file.path(out, "2d_cobursting_simulations.csv"), row.names = FALSE)
+  levels_x <- c("experiment", "permuted cells", intersect(GROUP_ORDER, unique(sims_cob$kind)))
+  cob <- do.call(rbind, lapply(split(cob, list(cob$statistic, cob$kind), drop = TRUE),
+                               function(x) if (nrow(x) > 20000) x[sample.int(nrow(x), 20000), ] else x))
+  cob$kind <- factor(cob$kind, levels = levels_x); sims_cob$kind <- factor(sims_cob$kind, levels = levels_x)
+  cob$statistic <- factor(COB_NAMES[cob$statistic], levels = COB_NAMES)
+  sims_cob$statistic <- factor(COB_NAMES[sims_cob$statistic], levels = COB_NAMES)
+  band <- aggregate(value ~ statistic, cob[cob$kind == "experiment", ], function(v) quantile(v, DATA_RANGE))
+  band <- data.frame(statistic = band$statistic, low = band$value[, 1], high = band$value[, 2])
+  p2d <- ggplot(cob, aes(kind, value)) +
+    geom_rect(data = band, aes(xmin = -Inf, xmax = Inf, ymin = low, ymax = high), inherit.aes = FALSE, fill = "#2a78d6", alpha = 0.08) +
+    geom_hline(yintercept = 1, colour = "grey50", linewidth = 0.3) +
+    geom_violin(aes(colour = kind), fill = NA, scale = "width", width = 0.8, linewidth = 0.4) +
+    geom_boxplot(data = sims_cob, width = 0.5, outlier.shape = NA, colour = "grey30", fill = NA, linewidth = 0.3) +
+    geom_jitter(data = sims_cob, aes(fill = kind), shape = 21, colour = "white", stroke = 0.15, size = 1.4, alpha = 0.6,
+                width = 0.25, height = 0) +
+    facet_wrap(~statistic, ncol = 3, scales = "free_y") +
+    scale_colour_manual(NULL, values = c(experiment = "#2a78d6", `permuted cells` = "grey55"), guide = "none") +
+    scale_fill_manual("hat-shaped\nsimulations", values = GROUP_COLOURS, drop = TRUE) +
+    scale_y_log10() +
+    labs(x = NULL, y = "per track (violins); median over tracks (simulations)",
+         title = sprintf("Co-bursting: experiment (blue violin; band = middle %g%% of tracks), permuted cells (grey), hat-shaped simulations by model type",
+                         100 * diff(DATA_RANGE))) +
+    theme_classic(base_size = 8) + theme(axis.text.x = element_text(angle = 35, hjust = 1), strip.background = element_blank(),
+                                         plot.title = element_text(size = 8.5, face = "bold"))
+  save_plot(p2d, "2d_cobursting_data_vs_simulations", 11, 4.2)
+}
+
 folds_figure(sim_folds, "hat-shaped", "hat-shaped\nsimulations",
              "Folds per experimental track (blue violin, | = median) and the folds the hat-shaped simulations use (points)",
              "2b_folds_data_vs_simulations")

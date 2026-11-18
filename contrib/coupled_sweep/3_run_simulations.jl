@@ -176,6 +176,17 @@ function export_traces(cfg, sim_ids)
                 end
             end
         end
+        counts = zeros(Int, size(states)..., 2)
+        for index in CartesianIndices(states)
+            counts[index, 1] = count_ones(decoded[index][2]); counts[index, 2] = count_ones(decoded[index][3])
+        end
+        promoter, first = promoter_and_first(model, states)
+        open(joinpath(folder, "statistics.csv"), "w") do io      # the trace statistics of this dataset
+            println(io, "statistic,value")
+            for (name, value) in zip(STAT_NAMES, trace_statistics(promoter, first, counts, cfg))
+                println(io, name, ",", fmt(value))
+            end
+        end
         println("sim $id ($(row["model_id"])): wrote $folder")
     end
 end
@@ -638,9 +649,11 @@ function simulate_replicate(row, model, replicate, cfg)
         cfg.insert_steps == [""] || error("insert_steps needs simulator = \"fast\"")
         Random.seed!(seed)
         counts = simulate_stochasticgene(model, cfg)
-        return [(; curves=correlation_curves(counts, cfg), metrics=on_and_reporters(counts, cfg))]
+        return [(; curves=correlation_curves(counts, cfg), metrics=on_and_reporters(counts, cfg),
+                   stats=trace_statistics(nothing, nothing, counts, cfg))]
     end
     states = simulate_fast_states(model, cfg, Xoshiro(seed))
+    promoter, first = promoter_and_first(model, states)
     map(cfg.insert_steps) do variant
         first_E, first_G = variant == "" ? (1, 1) : parse.(Int, collect(variant))
         counts = zeros(Int, cfg.nframes, cfg.ntraces, 2)
@@ -649,8 +662,97 @@ function simulate_replicate(row, model, replicate, cfg)
             counts[index, 1] = count_ones(bits_E >> (first_E - 1))
             counts[index, 2] = count_ones(bits_G >> (first_G - 1))
         end
-        (; curves=correlation_curves(counts, cfg), metrics=on_and_reporters(counts, cfg))
+        (; curves=correlation_curves(counts, cfg), metrics=on_and_reporters(counts, cfg),
+           stats=trace_statistics(promoter, first, counts, cfg))
     end
+end
+
+# ---------------------------------------------------------------------------
+# Trace statistics, computed exactly as paper_figures.R computes them from the decoded experimental traces
+# ---------------------------------------------------------------------------
+const STAT_SOURCES = ("1", "2", "3", "R", "3R")          # source conditions ("3R" = 3+R)
+const STAT_RATES = ("R12", "R21", "R23", "R32", "Initiate")
+const STAT_MIN_FRAMES = 5      # per track: frames needed in and out of the condition
+const STAT_MIN_TRACKS = 5      # tracks needed for a median
+const STAT_NAMES = vcat(["mfold_$(d)_$(c)_$(r)" for d in ("EG", "GE") for c in STAT_SOURCES for r in STAT_RATES],
+                        ["cob_onset_G_given_E", "cob_onset_E_given_G", "cob_coON"])
+
+"""
+The median over tracks of each trace statistic of one dataset (STAT_NAMES):
+  mfold_<EG|GE>_<condition>_<rate>: the fold measured like in the data: the rate of a transition of the target gene
+      (G for EG) is base x (1 + (fold - 1) x n), n = number of coupling effects of the source condition at that frame
+      (states 1, 2, 3: 1 while in it; R: the number of reporters; 3R: 1 in state 3 plus the number of reporters);
+      fold = 1 + ((k1 + 0.5) T0 / (k0 + 0.5) - T1) / N1 (k = events, T = frames at risk, 1 = n > 0, 0 = n = 0,
+      N1 = sum of n), at least 0.001; NA with fewer than STAT_MIN_FRAMES frames on a side or no event.
+      Needs promoter states (NaN with the StochasticGene simulator).
+  cob_onset_G_given_E: G burst-onset rate (reporters 0 -> above 0) while E has reporters / while it has none
+      ((k1 + 0.5) / T1) / ((k0 + 0.5) / T0); cob_onset_E_given_G likewise;
+  cob_coON: P(both ON) / (P(E ON) P(G ON)) = (n_both + 0.5) L / ((n_E + 0.5)(n_G + 0.5)); NA if a gene is never ON.
+promoter[frame, trace, gene] (or nothing), first[frame, trace, gene] = first reporter position occupied,
+counts[frame, trace, gene] = reporter counts.
+"""
+function trace_statistics(promoter, first, counts, cfg)
+    values = [Float64[] for _ in STAT_NAMES]
+    for trace in axes(counts, 2)
+        L = cfg.lengths[trace]
+        if promoter !== nothing
+            for (d, (src, tgt)) in enumerate(((1, 2), (2, 1)))
+                T1 = zeros(5, 5); k1 = zeros(5, 5); N1 = zeros(5, 5); T = zeros(5); K = zeros(5)
+                for t in 1:(L - 1)
+                    ps, rs = promoter[t, trace, src], counts[t, trace, src]
+                    n = (Int(ps == 1), Int(ps == 2), Int(ps == 3), rs, Int(ps == 3) + rs)
+                    pt, pn = promoter[t, trace, tgt], promoter[t + 1, trace, tgt]
+                    risk = (pt == 1, pt == 2, pt == 2, pt == 3, pt == 3 && !first[t, trace, tgt])
+                    event = (pn == 2, pn == 1, pn == 3, pn == 2, first[t + 1, trace, tgt])
+                    for r in 1:5
+                        risk[r] || continue
+                        e = Int(event[r])
+                        T[r] += 1; K[r] += e
+                        for c in 1:5
+                            n[c] > 0 || continue
+                            T1[c, r] += 1; k1[c, r] += e; N1[c, r] += n[c]
+                        end
+                    end
+                end
+                for c in 1:5, r in 1:5
+                    T0, k0 = T[r] - T1[c, r], K[r] - k1[c, r]
+                    (T1[c, r] < STAT_MIN_FRAMES || T0 < STAT_MIN_FRAMES || k1[c, r] + k0 == 0) && continue
+                    fold = 1 + ((k1[c, r] + 0.5) * T0 / (k0 + 0.5) - T1[c, r]) / N1[c, r]
+                    push!(values[(d - 1) * 25 + (c - 1) * 5 + r], max(fold, 1e-3))
+                end
+            end
+        end
+        for (k, (cond, tgt)) in enumerate(((1, 2), (2, 1)))          # onsets of tgt while cond has reporters or not
+            T1 = k1 = T0 = k0 = 0
+            for t in 1:(L - 1)
+                counts[t, trace, tgt] == 0 || continue
+                e = Int(counts[t + 1, trace, tgt] > 0)
+                if counts[t, trace, cond] > 0
+                    T1 += 1; k1 += e
+                else
+                    T0 += 1; k0 += e
+                end
+            end
+            (T1 < STAT_MIN_FRAMES || T0 < STAT_MIN_FRAMES || k1 + k0 == 0) && continue
+            push!(values[50 + k], ((k1 + 0.5) / T1) / ((k0 + 0.5) / T0))
+        end
+        onE = count(>(0), view(counts, 1:L, trace, 1)); onG = count(>(0), view(counts, 1:L, trace, 2))
+        both = count(t -> counts[t, trace, 1] > 0 && counts[t, trace, 2] > 0, 1:L)
+        (onE > 0 && onG > 0) && push!(values[53], (both + 0.5) * L / ((onE + 0.5) * (onG + 0.5)))
+    end
+    [length(v) >= STAT_MIN_TRACKS ? median(v) : NaN for v in values]
+end
+
+"Promoter states and first-position occupancy [frame, trace, gene] of fast-simulator states."
+function promoter_and_first(model, states)
+    promoter = zeros(Int, size(states)..., 2); first = falses(size(states)..., 2)
+    for index in CartesianIndices(states)
+        p, bits_E, bits_G = sstate(model, states[index])
+        e, g, _ = pstate(p)
+        promoter[index, 1] = e; promoter[index, 2] = g
+        first[index, 1] = isodd(bits_E); first[index, 2] = isodd(bits_G)
+    end
+    promoter, first
 end
 
 fmt(x) = isfinite(x) ? @sprintf("%.8g", x) : "NA"
@@ -701,7 +803,8 @@ function write_results(rows, models, results, cfg, folder, first_id, last_id)
         open(metrics_path * ".tmp", "w") do metrics_io
             cfg.expanded || println(curves_io, "sim_id,observable,pair,lag_frames,lag_min,mean,se," * join(["rep$r" for r in 1:cfg.replicates], ','))
             println(metrics_io, "sim_id,model_id,on_E,on_E_se,on_G,on_G_se,reporters_E,reporters_E_se," *
-                                "reporters_G,reporters_G_se," * join(vcat(score_names, base_names, replicate_names, "clipped"), ','))
+                                "reporters_G,reporters_G_se," * join(vcat(score_names, base_names, replicate_names, "clipped",
+                                                                          STAT_NAMES), ','))
             for (i, row) in enumerate(rows)
                 replicates = results[(i - 1) * cfg.replicates .+ (1:cfg.replicates)]
                 bins = replicates[1].curves                                   # same lag bins in every replicate
@@ -731,6 +834,10 @@ function write_results(rows, models, results, cfg, folder, first_id, last_id)
                     append!(cells, fmt.([r.metrics[k] for r in replicates]))
                 end
                 push!(cells, models[i].clipped ? "1" : "0")
+                for k in eachindex(STAT_NAMES)                                # trace statistics: mean over replicates
+                    finite = filter(isfinite, [r.stats[k] for r in replicates])
+                    push!(cells, fmt(isempty(finite) ? NaN : mean(finite)))
+                end
                 println(metrics_io, join(cells, ','))
             end
         end
