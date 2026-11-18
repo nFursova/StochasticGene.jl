@@ -43,6 +43,13 @@ HIDDEN_GROUPS = {
 # A regulated rate is multiplied by 1 + (fold - 1) for every active coupling effect: fold above 1 activates,
 # fold below 1 inhibits, fold 1 does nothing.
 PARAMETERS = ["fold_EG", "fold_GE", "fold_HE", "fold_HG", "h12", "h21", "h23", "h32"]
+# Hidden-unit effect, [sweep] hidden_effect:
+#   "activating" (default): the hidden unit turns the genes on: it speeds the forward rates (R12, R23, Initiate:
+#                fold 1 or above) and slows the reverse rates (R21, R32: fold 1 or below, the inverse range)
+#   "both":      every hidden fold from 1/largest to largest (activating or repressing)
+#   "increase":  every hidden fold 1 or above, also for R21 and R32 (which then turns the genes off; the behaviour
+#                before hidden_effect existed)
+FORWARD_RATES = ("R12", "R23", "Initiate")
 # Extensive sweep: every regulated rate of a connection has its own fold, e.g. fold_EG_R12 and fold_EG_R23.
 RATE_FOLDS = [f"fold_{edge}_{rate}" for edge in ("EG", "GE", "HE", "HG") for rate in ("R12", "R21", "R23", "R32", "Initiate")]
 
@@ -124,13 +131,21 @@ def swept_parameters(m, sweep):
             connection("GE", gene_folds)
     elif m["group"] in HIDDEN_GROUPS:
         spec = HIDDEN_GROUPS[m["group"]]
-        connection("HE", sweep["coupling_fold"])
-        if grid:
+        effect = sweep.get("hidden_effect", "activating")
+        connection("HE", gene_folds if effect == "both" else sweep["coupling_fold"])
+        if grid:                                        # one fold for both genes; per-rate direction in parameter_sets
             tied["fold_HG"] = "fold_HE"
         elif spec.get("same_folds"):                    # H3 symmetric: G's fold of each rate = E's fold of that rate
             tied.update({f"fold_HG_{rate}": f"fold_HE_{rate}" for rate in m["HG_rates"].split("+")})
         else:
             connection("HG", None)
+        if not grid:                                    # the range of each hidden fold, by hidden_effect
+            for name in [n for n in free if n.startswith(("fold_HE_", "fold_HG_"))]:
+                low, high = free[name]
+                if effect == "both":
+                    free[name] = [1 / high, high]
+                elif effect == "activating" and name.split("_")[2] not in FORWARD_RATES:
+                    free[name] = [1 / high, 1 / low]
         free.update({rate: sweep["hidden_rate"] if grid else extensive[rate] for rate in spec["rates"]})
         tied.update(spec["tied"])
     return free, tied
@@ -163,6 +178,11 @@ def parameter_sets(m, sweep):
         sets = [{name: column[i] for name, column in columns.items()} for i in range(n)]
     for s in sets:
         s.update({name: s[source] for name, source in tied.items()})
+        if sweep["mode"] == "grid" and m["group"] in HIDDEN_GROUPS and sweep.get("hidden_effect", "activating") == "activating":
+            for edge in ("HE", "HG"):                   # grid: one fold, inverted for the reverse rates
+                for rate in m[f"{edge}_rates"].split("+"):
+                    fold = s[f"fold_{edge}"]
+                    s[f"fold_{edge}_{rate}"] = fold if rate in FORWARD_RATES else 1 / fold
     return sets
 
 
@@ -183,12 +203,15 @@ def check(sweep):
     """Stop with a clear message if the sweep settings cannot be used."""
     if sweep["mode"] not in ("grid", "extensive"):
         raise SystemExit('sweep.mode must be "grid" or "extensive"')
+    if sweep.get("hidden_effect", "activating") not in ("activating", "both", "increase"):
+        raise SystemExit('sweep.hidden_effect must be "activating", "both" or "increase"')
     if min(sweep["coupling_fold"]) <= 1:
         raise SystemExit("sweep.coupling_fold lists activation folds, all above 1; their inverses are added for gene-to-gene models")
     if sweep["mode"] == "extensive":
         ranges = extensive_ranges(sweep)
         if min(ranges["fold_HE"][0], ranges["fold_HG"][0]) < 1:
-            raise SystemExit("[sweep.extensive] fold_HE and fold_HG must start at 1 or above: hidden models only activate")
+            raise SystemExit("[sweep.extensive] fold_HE and fold_HG are given as activation strengths, 1 or above "
+                             "(hidden_effect turns them into folds below 1 for the reverse rates, or both ways)")
 
 
 # ---------------------------------------------------------------------------

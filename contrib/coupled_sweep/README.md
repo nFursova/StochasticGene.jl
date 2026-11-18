@@ -24,7 +24,8 @@ Three commands; everything else in this folder is optional.
 
 1. Generate the model panel (`config_v5_semi.toml`: one CCAT1 or MYC state, 1, 2, 3, R or 3+R, regulating one set of
    rates in the other gene; the same in both directions for reciprocal models; hidden units regulating the same rates
-   in both genes; every rate its own fold, 0.01 to 100, hidden units 1 to 100; 100 parameter sets per architecture):
+   in both genes; every rate its own fold, 0.01 to 100; hidden units activate: 1 to 100 for R12, R23 and Initiate,
+   0.01 to 1 for R21 and R32; 100 parameter sets per architecture):
    `python3 1_generate_models.py config_v5_semi.toml`
 2. Simulate (step 5 and 6 below write and submit the swarm). With `insert_steps = ["11", "13", "33"]` every simulation
    is analysed three ways and written to `results/insert11`, `results/insert13`, `results/insert33`.
@@ -215,7 +216,9 @@ Each swarm job writes one `curves_` and one `metrics_` file, named by its first 
   activates, below 1 inhibits, 1 does nothing. Each kind of connection has its own fold column in
   `simulations.csv`: `fold_EG` (E regulates G), `fold_GE`, `fold_HE`, `fold_HG`.
 - Gene-to-gene models (`E_to_G`, `G_to_E`, `reciprocal`) are run with every fold and its inverse.
-  Hidden models only activate.
+  Hidden models activate ([sweep] hidden_effect = "activating", the default): they speed R12, R23 and Initiate
+  (fold above 1) and slow R21 and R32 (fold below 1). "both" allows either direction; "increase" puts every hidden
+  fold above 1, also for R21 and R32 (the behaviour of runs made before hidden_effect existed).
 - Reciprocal models, `[sweep] reciprocal_states`: `"same"` uses the same source state and the same fold in
   both directions; `"all_pairs"` uses every pair of source states and every pair of folds, so one direction
   can activate while the other inhibits.
