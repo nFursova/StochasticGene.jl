@@ -46,9 +46,9 @@ track, estimated with the model's form, rate x (1 + (fold - 1) x n) with n = num
 labels give the number of tracks and how many simulations use the connection and are hat-shaped), `3_heatmap_selection1`, `4_heatmap_selection2` (selection 1 with every
 fold inside the middle 50% of the experimental tracks' folds; hidden-unit models have no observable fold and stay),
 and `5_ranking` with `5_candidates_to_fit.csv` (best parameter set per architecture of selection 2, ranked by NRMSE;
-candidates = top 25%), and `6_top_architectures_insert_steps` (the 20 best architectures: experimental
-cross-correlation and the simulated one, mean +/- SE, of their best parameter set with insert steps 11, 13 and 33
-in three colours). Every selection is also saved as CSV.
+candidates = top 25%), and `6_selection2_architectures_insert_steps` (every architecture of selection 2, in ranking order, 24 per
+page: experimental cross-correlation and the simulated one, mean +/- SE, of their best parameter set with insert
+steps 11, 13 and 33 in three colours). Every selection is also saved as CSV.
 
 ## Two kinds of run
 

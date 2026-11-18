@@ -10,7 +10,7 @@
 #      middle DATA_RANGE of the experimental per-track folds of that connection (hidden-unit models have no
 #      observable fold and are kept).
 #   5. Ranking of the architectures in selection 2 by NRMSE (best parameter set of each), and the candidate list.
-#   6. The TOP_CURVES best architectures of the ranking: the experimental cross-correlation and the simulated one
+#   6. Every architecture of selection 2, in ranking order: the experimental cross-correlation and the simulated one
 #      (mean +/- SE over replicates) of their best parameter set, analysed with insert steps 11, 13 and 33.
 #
 #   Rscript paper_figures.R RUN_DIR INSERT EXPERIMENTAL_CSV CCAT1_PREDICTED.csv MYC_PREDICTED.csv OUTPUT_FOLDER
@@ -44,7 +44,8 @@ RANK_BY       <- "xcor"         # "xcor" = NRMSE of the cross-correlation; "mean
 TOP_FRACTION  <- 0.25           # candidates: the best this fraction of architectures in selection 2 ...
 NRMSE_CUTOFF  <- NA             # ... or, if a number, every architecture with NRMSE below it
 HEATMAP_LAG   <- 120            # heatmap lag range, minutes
-TOP_CURVES    <- 20             # figure 6: this many best architectures
+TOP_CURVES    <- Inf            # figure 6: this many best architectures of selection 2 (Inf = all)
+PANELS_PER_PAGE <- 24           # figure 6: panels per page (6 rows of 4); one multi-page PDF, one PNG per page
 INSERT_COLOURS <- c(`11` = "#2a78d6", `13` = "#eb6834", `33` = "#1baf7a")   # figure 6: insert-step variants
 MAX_POINTS    <- 100000         # figure 1: at most this many points drawn per model type
 SEED          <- 20261118
@@ -475,21 +476,30 @@ if (nrow(selected2)) {
   e <- do.call(rbind, lapply(panel, function(p) cbind(e[, c("lag_min", "mean", "se")], panel = p)))
   e$panel <- factor(e$panel, levels = panel)
   colours <- if (nzchar(insert)) INSERT_COLOURS else c(`all positions` = "#2a78d6")
-  p6 <- ggplot(sim_curves, aes(lag_min, mean)) +
-    geom_hline(yintercept = 0, colour = "grey70", linewidth = 0.3) +
-    geom_ribbon(data = e, aes(ymin = mean - se, ymax = mean + se), fill = "grey80") +
-    geom_line(data = e, colour = "black", linewidth = 0.5) +
-    geom_ribbon(aes(ymin = mean - se, ymax = mean + se, fill = insert), alpha = 0.2) +
-    geom_line(aes(colour = insert), linewidth = 0.5) +
-    facet_wrap(~panel, ncol = 4, labeller = label_wrap_gen(38)) +
-    scale_colour_manual("insert step\n(CCAT1, MYC)", values = colours) +
-    scale_fill_manual("insert step\n(CCAT1, MYC)", values = colours) +
-    labs(x = "lag (min); positive = MYC after CCAT1", y = "cross-correlation (reporter count)",
-         title = sprintf("The %d best architectures (ranked with insert %s): experiment (black, \u00b1 SE) and simulation (mean \u00b1 SE over replicates)",
-                         nrow(top), if (nzchar(insert)) insert else "all positions")) +
-    theme_classic(base_size = 7) + theme(strip.background = element_blank(), strip.text = element_text(size = 6),
-                                         plot.title = element_text(size = 8.5, face = "bold"))
-  save_plot(p6, "6_top_architectures_insert_steps", 11, 1.9 * ceiling(nrow(top) / 4) + 1)
+  pages <- split(levels(sim_curves$panel), ceiling(seq_along(levels(sim_curves$panel)) / PANELS_PER_PAGE))
+  name <- "6_selection2_architectures_insert_steps"
+  pdf(file.path(out, paste0(name, ".pdf")), width = 11, height = 1.9 * ceiling(PANELS_PER_PAGE / 4) + 1)
+  for (k in seq_along(pages)) {
+    on_page <- pages[[k]]
+    p6 <- ggplot(sim_curves[sim_curves$panel %in% on_page, ], aes(lag_min, mean)) +
+      geom_hline(yintercept = 0, colour = "grey70", linewidth = 0.3) +
+      geom_ribbon(data = e[e$panel %in% on_page, ], aes(ymin = mean - se, ymax = mean + se), fill = "grey80") +
+      geom_line(data = e[e$panel %in% on_page, ], colour = "black", linewidth = 0.5) +
+      geom_ribbon(aes(ymin = mean - se, ymax = mean + se, fill = insert), alpha = 0.2) +
+      geom_line(aes(colour = insert), linewidth = 0.5) +
+      facet_wrap(~panel, ncol = 4, labeller = label_wrap_gen(38)) +
+      scale_colour_manual("insert step\n(CCAT1, MYC)", values = colours) +
+      scale_fill_manual("insert step\n(CCAT1, MYC)", values = colours) +
+      labs(x = "lag (min); positive = MYC after CCAT1", y = "cross-correlation (reporter count)",
+           title = sprintf("Selection 2: %d architectures in ranking order (insert %s), page %d of %d: experiment (black, ± SE), simulation (mean ± SE)",
+                           nrow(top), if (nzchar(insert)) insert else "all positions", k, length(pages))) +
+      theme_classic(base_size = 7) + theme(strip.background = element_blank(), strip.text = element_text(size = 6),
+                                           plot.title = element_text(size = 8.5, face = "bold"))
+    print(p6)
+    ggsave(file.path(out, sprintf("%s_page%02d.png", name, k)), p6, width = 11,
+           height = 1.9 * ceiling(length(on_page) / 4) + 1, dpi = 300)
+  }
+  invisible(dev.off())
 }
 cat(sprintf("Selection 1 (hat shape): %d simulations, %d architectures\n", nrow(selected1), length(unique(selected1$model_id))))
 cat(sprintf("Selection 2 (folds within the data's middle %g%%): %d simulations, %d architectures\n",
