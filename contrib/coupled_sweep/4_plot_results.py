@@ -3,6 +3,7 @@
 
     python3 4_plot_results.py config.toml
     python3 4_plot_results.py config_expanded.toml --profile full      (expanded runs; full is the default)
+    python3 4_plot_results.py config.toml --insert 13                  (runs with [simulation] insert_steps: one variant)
 
 Reads the simulation list (simulations.csv, or expanded_models.csv and expanded_simulations.csv) and
 <run_dir>/results/, and writes into <run_dir>:
@@ -236,7 +237,7 @@ def load(config_path, profile):
     folder = config_path.parent
     run_dir, expanded, replicates = run_folder(config, folder, profile)
     simulations = read_simulations(run_dir, expanded)
-    oldest_first = lambda pattern: sorted((run_dir / "results").glob(pattern), key=lambda f: f.stat().st_mtime)
+    oldest_first = lambda pattern: sorted((run_dir / RESULTS).glob(pattern), key=lambda f: f.stat().st_mtime)
     metrics = pd.concat([pd.read_csv(f) for f in oldest_first("metrics_*.csv")])
     repeated = int(metrics["sim_id"].duplicated().sum())
     if repeated:
@@ -1224,8 +1225,16 @@ centre {hat["center"]:.3f}, left {hat["left"]:.3f}, right {hat["right"]:.3f}, de
 
 # ---------------------------------------------------------------------------
 
+RESULTS = "results"          # results/insert<variant> with --insert
+
+
 def main():
+    global RESULTS
     arguments = sys.argv[1:]
+    if "--insert" in arguments:
+        at = arguments.index("--insert")
+        RESULTS = f"results/insert{arguments[at + 1]}"
+        del arguments[at:at + 2]
     profile = "full"
     if "--profile" in arguments:
         at = arguments.index("--profile")

@@ -24,6 +24,8 @@ RATE_SETS = ["R12", "R21", "R23", "R32", "Initiate",
 # States of the source gene that regulate, in the gene-to-gene models (E_to_G, G_to_E and reciprocal):
 # promoter state 1, 2 or 3, or R = StochasticGene's "Rsum": every occupied reporter position of the source
 # gene adds one coupling effect, so the rate is multiplied by 1 + (fold - 1) * (number of occupied positions).
+# "3+R": promoter state 3 adds one coupling effect and every occupied reporter position adds another.
+# The default list; [sweep] source_states replaces it (for example ["1", "2", "3", "R", "3+R"]).
 SOURCE_STATES = ["1", "2", "3", "R"]
 
 # The hidden groups.
@@ -32,7 +34,8 @@ SOURCE_STATES = ["1", "2", "3", "R"]
 #   "rates" are the hidden-unit rates the group sweeps; "tied" rates are set equal to another one.
 HIDDEN_GROUPS = {
     "H2":            dict(hidden="H2", rates=["h12", "h21"], tied={}),
-    "H3_symmetric":  dict(hidden="H3", rates=["h12", "h21"], tied={"h23": "h21", "h32": "h12"}),   # R32 = R12, R23 = R21
+    "H3_symmetric":  dict(hidden="H3", rates=["h12", "h21"], tied={"h23": "h21", "h32": "h12"},    # R32 = R12, R23 = R21
+                          same_folds=True),       # extensive: each regulated rate has the same fold for E and for G
     "H3_asymmetric": dict(hidden="H3", rates=["h12", "h21", "h23", "h32"], tied={}),
 }
 # Every parameter of a simulation: the coupling fold of each kind of connection, then the hidden-unit rates.
@@ -54,19 +57,24 @@ def model(group, name, EG="", GE="", HE="", HG="", EG_state="3", GE_state="3", c
 
 
 def all_models(sweep):
-    """Every model, group by group. Each group starts with a control whose coupling folds are 1 (gamma = 0)."""
+    """Every model, group by group. Each group starts with a control whose coupling folds are 1 (gamma = 0).
+    Reciprocal models, [sweep] reciprocal_states: "same" = both directions from the same source state, every pair of
+    rate sets; "all_pairs" = every pair of source states and rate sets; "mirror" = both directions from the same
+    source state AND the same rate set (E regulates G's R23 from state 2, and G regulates E's R23 from state 2)."""
     first = RATE_SETS[0]
+    SOURCE_STATES = sweep.get("source_states", globals()["SOURCE_STATES"])
     models = [model("uncoupled", "", control=True)]                      # no connections at all
     models.append(model("E_to_G", "gamma0", EG=first, control=True))
     models += [model("E_to_G", f"state{s}__{r}", EG=r, EG_state=s) for s in SOURCE_STATES for r in RATE_SETS]
     models.append(model("G_to_E", "gamma0", GE=first, control=True))
     models += [model("G_to_E", f"state{s}__{r}", GE=r, GE_state=s) for s in SOURCE_STATES for r in RATE_SETS]
     models.append(model("reciprocal", "gamma0", EG=first, GE=first, control=True))
-    # Reciprocal: the two directions use the same source state, or every pair of source states.
-    same = sweep.get("reciprocal_states", "same") == "same"
-    state_pairs = [(s, t) for s in SOURCE_STATES for t in SOURCE_STATES if s == t or not same]
+    mode = sweep.get("reciprocal_states", "same")
+    if mode not in ("same", "all_pairs", "mirror"):
+        raise SystemExit('sweep.reciprocal_states must be "same", "all_pairs" or "mirror"')
+    state_pairs = [(s, t) for s in SOURCE_STATES for t in SOURCE_STATES if s == t or mode == "all_pairs"]
     models += [model("reciprocal", f"EG_state{s}_{r}__GE_state{t}_{q}", EG=r, GE=q, EG_state=s, GE_state=t)
-               for s, t in state_pairs for r in RATE_SETS for q in RATE_SETS]
+               for s, t in state_pairs for r in RATE_SETS for q in RATE_SETS if mode != "mirror" or r == q]
     for group in HIDDEN_GROUPS:                                           # the hidden unit regulates the same rates of E and G
         models.append(model(group, "gamma0", HE=first, HG=first, control=True))
         models += [model(group, r, HE=r, HG=r) for r in RATE_SETS]
@@ -119,6 +127,8 @@ def swept_parameters(m, sweep):
         connection("HE", sweep["coupling_fold"])
         if grid:
             tied["fold_HG"] = "fold_HE"
+        elif spec.get("same_folds"):                    # H3 symmetric: G's fold of each rate = E's fold of that rate
+            tied.update({f"fold_HG_{rate}": f"fold_HE_{rate}" for rate in m["HG_rates"].split("+")})
         else:
             connection("HG", None)
         free.update({rate: sweep["hidden_rate"] if grid else extensive[rate] for rate in spec["rates"]})

@@ -12,10 +12,36 @@ E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit.
 | `4_plot_results.py` | Writes the results report (HTML), every plot as PDF and PNG, and the ranking |
 | `5_nearest_simulations.py` | Optional: the simulations of one architecture nearest a given fold or StochasticGene coupling γ (fold = 1 + γ), e.g. the value a direct fit found |
 | `6_trace_relationships.py` | Optional: how CCAT1 and MYC relate in decoded traces (burst-aligned averages, model-free fold of every architecture, between- vs within-cell correlation), no model fit |
+| `paper_figures.R` | The paper figures: shape map, folds in the data against the simulations, heatmaps of the two selections, ranking and candidates |
 | `7_compare_folds.py` | Optional: the folds the shape-passing simulations need against the folds in the decoded traces, and `fit_candidates.csv`: the architectures to fit, with starting values |
 
 Needs Python 3.11+ with numpy, pandas and matplotlib, Julia, and R for step 0. StochasticGene is only
 needed for `simulator = "stochasticgene"`.
+
+## Short path for the paper figures
+
+Three commands; everything else in this folder is optional.
+
+1. Generate the model panel (`config_v5_semi.toml`: one CCAT1 or MYC state, 1, 2, 3, R or 3+R, regulating one set of
+   rates in the other gene; the same in both directions for reciprocal models; hidden units regulating the same rates
+   in both genes; every rate its own fold, 0.01 to 100, hidden units 1 to 100; 100 parameter sets per architecture):
+   `python3 1_generate_models.py config_v5_semi.toml`
+2. Simulate (step 5 and 6 below write and submit the swarm). With `insert_steps = ["11", "13", "33"]` every simulation
+   is analysed three ways and written to `results/insert11`, `results/insert13`, `results/insert33`.
+3. Figures, once per insert variant:
+
+```bash
+Rscript paper_figures.R runs/semi_extensive_insert_steps 11 data/experimental.csv CCAT1_predictedtraces.csv MYC_predictedtraces.csv figures_insert11
+```
+
+`paper_figures.R` (R with ggplot2; settings at its top) writes, in order: `1_shape_map` (every simulation's
+cross-correlation centre, within +/-5 min, against its flanks, 20 to 60 min, coloured by NRMSE; shaded = Mexican-hat
+shape = selection 1), `2_folds_data_vs_simulations` (for every CCAT1-MYC connection: the fold in each experimental
+track, blue, and with the pairing broken by 1,000 circular shifts and 1,000 permutations of cells, grey, against the
+folds of the hat-shaped simulations, points), `3_heatmap_selection1`, `4_heatmap_selection2` (selection 1 with every
+fold inside the middle 50% of the experimental tracks' folds; hidden-unit models have no observable fold and stay),
+and `5_ranking` with `5_candidates_to_fit.csv` (best parameter set per architecture of selection 2, ranked by NRMSE;
+candidates = top 25%). Every selection is also saved as CSV.
 
 ## Two kinds of run
 

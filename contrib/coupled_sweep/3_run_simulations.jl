@@ -26,6 +26,11 @@ Each run writes two files into <run_dir>/results/:
                                  reporter counts of every replicate (columns on_E_rep1, ...), and clipped (1 if a
                                  rate multiplier would have gone below MIN_FACTOR and was held there)
 
+Insert steps ([simulation] insert_steps, e.g. ["11", "13", "33"]): the same simulations are also analysed as if
+the reporter were inserted at a later position: "13" counts CCAT1 transcripts from position 1 and MYC transcripts
+only from position 3 (the first digit is CCAT1, the second MYC). Every variant is written to its own folder,
+results/insert11, results/insert13, ... (fast simulator only). Without insert_steps: results/, all positions counted.
+
 Names: E = CCAT1 (enhancer), G = MYC (gene), H = hidden unit. Both genes are the 3301 model:
 promoter states 1 <-> 2 <-> 3, initiation from state 3, three reporter positions.
 --export-traces takes sim_ids separated by commas, or a CSV file with a column sim_id or start_sim_id (for example
@@ -96,6 +101,7 @@ function read_config(path, profile)
        simulator=sim["simulator"], replicates, interval=sim["interval_min"],
        rate_matching=get(sim, "rate_matching", "time_average"),
        warmup_timescales=get(sim, "warmup_timescales", 3.0), epsilon=sim["epsilon"],
+       insert_steps=String.(get(sim, "insert_steps", [""])),           # "" = every position counted, results/
        max_lag=sim["score_max_lag_min"], seed=sim["seed"], swarm=config["swarm"])
 end
 
@@ -193,7 +199,8 @@ count_rows(cfg) = countlines(joinpath(cfg.run_dir, cfg.expanded ? "expanded_simu
 struct Edge
     source::Int    # 1 = E, 2 = G, 3 = H
     states::Vector{Int}  # promoter states 1 to 3 (hidden states for H) that regulate, any of them (e.g. [1, 2]);
-                   # or [4] = "R": StochasticGene's Rsum, every occupied reporter position adds one coupling effect
+                   # 4 = "R": StochasticGene's Rsum, every occupied reporter position adds one coupling effect;
+                   # [3, 4] = "3+R": state 3 adds one effect and every occupied reporter position adds another
     target::Int    # 1 = E, 2 = G
     rate::Int      # index into RATE_NAMES
     gamma::Float64 # fold - 1 of this connection (fold_EG, fold_GE, fold_HE or fold_HG)
@@ -223,8 +230,9 @@ end
 "How many coupling effects a connection contributes in this state: 1 if its source is in one of the regulating
 promoter (or hidden) states, else 0; for R, the number of occupied reporter positions of the source gene (0 to 3)."
 function activity(edge, p, bits_E, bits_G)
-    edge.states == [4] && return count_ones(edge.source == 1 ? bits_E : bits_G)
-    Int(pstate(p)[edge.source] in edge.states)
+    effects = Int(pstate(p)[edge.source] in edge.states)          # in a regulating promoter (or hidden) state
+    4 in edge.states && (effects += count_ones(edge.source == 1 ? bits_E : bits_G))   # R: + each occupied position
+    effects
 end
 
 """
@@ -353,7 +361,7 @@ function build_model(row, fitted, matching)
             push!(edges, Edge(source, states, target, findfirst(==(name), RATE_NAMES), parse(Float64, fold(edge, name)) - 1))
         end
     end
-    states(text) = text == "R" ? [4] : parse.(Int, split(text, '+'))                     # "3", "1+2" or "R" (Rsum)
+    states(text) = [part == "R" ? 4 : parse(Int, part) for part in split(text, '+')]     # "3", "1+2", "R" or "3+R"
     # Hidden units regulate from fixed states unless the list says otherwise:
     # H2: state 2 regulates both genes; H3: state 1 regulates E, state 3 regulates G.
     hidden_states(edge, default) = isempty(get(row, "$(edge)_state", "")) ? [default] : states(row["$(edge)_state"])
@@ -398,18 +406,6 @@ function simulate_fast_states(model, cfg, rng)
     states
 end
 
-"Reporter counts [frame, trace, gene] of the fast simulation."
-function simulate_fast(model, cfg, rng)
-    states = simulate_fast_states(model, cfg, rng)
-    counts = zeros(Int, cfg.nframes, cfg.ntraces, 2)
-    for index in CartesianIndices(states)
-        _, bits_E, bits_G = sstate(model, states[index])
-        counts[index, 1] = count_ones(bits_E)
-        counts[index, 2] = count_ones(bits_G)
-    end
-    counts
-end
-
 # ---------------------------------------------------------------------------
 # 4. StochasticGene simulator (the original way)
 # ---------------------------------------------------------------------------
@@ -441,7 +437,8 @@ function simulate_stochasticgene(model, cfg)
     for edge in model.edges
         count(other -> (other.target, other.rate) == (edge.target, edge.rate), model.edges) == 1 ||
             error("$(model.id): $(RATE_NAMES[edge.rate]) is regulated by more than one connection")
-        states = edge.states == [4] ? [4, 5, 6] : edge.source == 3 ? renumber.(edge.states) : edge.states
+        states = edge.source == 3 ? renumber.(edge.states) :
+                 vcat(filter(<(4), edge.states), 4 in edge.states ? [4, 5, 6] : Int[])     # R: one connection per position
         gamma = edge.gamma
         if 1 in states                                  # the unit starts in a regulating state: write it the other way round
             base[edge.target, edge.rate] *= 1 + gamma
@@ -637,13 +634,23 @@ end
 function simulate_replicate(row, model, replicate, cfg)
     seed = haskey(row, "seed") ? parse(UInt64, row["seed"]) + UInt64(replicate) :      # expanded runs: the generator's point_seed
            cfg.seed + 1000 * parse(Int, row["sim_id"]) + replicate
-    counts = if cfg.simulator == "fast"
-        simulate_fast(model, cfg, Xoshiro(seed))
-    else
+    if cfg.simulator != "fast"
+        cfg.insert_steps == [""] || error("insert_steps needs simulator = \"fast\"")
         Random.seed!(seed)
-        simulate_stochasticgene(model, cfg)
+        counts = simulate_stochasticgene(model, cfg)
+        return [(; curves=correlation_curves(counts, cfg), metrics=on_and_reporters(counts, cfg))]
     end
-    (; curves=correlation_curves(counts, cfg), metrics=on_and_reporters(counts, cfg))
+    states = simulate_fast_states(model, cfg, Xoshiro(seed))
+    map(cfg.insert_steps) do variant
+        first_E, first_G = variant == "" ? (1, 1) : parse.(Int, collect(variant))
+        counts = zeros(Int, cfg.nframes, cfg.ntraces, 2)
+        for index in CartesianIndices(states)            # count the occupied positions from the insert position on
+            _, bits_E, bits_G = sstate(model, states[index])
+            counts[index, 1] = count_ones(bits_E >> (first_E - 1))
+            counts[index, 2] = count_ones(bits_G >> (first_G - 1))
+        end
+        (; curves=correlation_curves(counts, cfg), metrics=on_and_reporters(counts, cfg))
+    end
 end
 
 fmt(x) = isfinite(x) ? @sprintf("%.8g", x) : "NA"
@@ -663,7 +670,14 @@ function run_simulations(rows, cfg, first_id, last_id)
         results[j] = simulate_replicate(rows[jobs[j][1]], models[jobs[j][1]], jobs[j][2], cfg)
     end
 
-    folder = mkpath(joinpath(cfg.run_dir, "results"))
+    for (v, variant) in enumerate(cfg.insert_steps)
+        folder = mkpath(joinpath(cfg.run_dir, "results", isempty(variant) ? "" : "insert$variant"))
+        write_results(rows, models, [result[v] for result in results], cfg, folder, first_id, last_id)
+    end
+end
+
+"Write the curves and metrics of one insert-step variant into `folder`."
+function write_results(rows, models, results, cfg, folder, first_id, last_id)
     stem = @sprintf("%06d-%06d", first_id, last_id)
     curves_path = joinpath(folder, cfg.expanded ? "curves_$stem.f32" : "curves_$stem.csv")
     metrics_path = joinpath(folder, "metrics_$stem.csv")
