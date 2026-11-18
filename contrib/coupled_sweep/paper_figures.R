@@ -56,8 +56,9 @@ if (!dir.exists(args[1]) && dir.exists(args[2])) args[1:2] <- args[2:1]   # acce
 if (!dir.exists(args[1])) stop("run folder not found: ", args[1])
 run_dir <- args[1]; insert <- if (args[2] %in% c("", "none", "-")) "" else args[2]; out <- args[6]
 results <- file.path(run_dir, "results", if (nzchar(insert)) paste0("insert", insert) else "")
-if (nzchar(insert) && !dir.exists(results)) {           # a run made without insert steps
-  message("no ", results, ": this run has no insert-step variants; reading ", file.path(run_dir, "results"))
+has_results <- function(folder) length(list.files(folder, pattern = "^metrics_.*\\.csv$")) > 0
+if (nzchar(insert) && !has_results(results)) {          # a run made without insert steps
+  message("no results in ", results, ": this run has no insert-step variants; reading ", file.path(run_dir, "results"))
   insert <- ""
   results <- file.path(run_dir, "results")
 }
@@ -472,7 +473,7 @@ if (nrow(selected2)) {
     d[!duplicated(d[, c("sim_id", "lag_min")]), ]
   }
   variants <- if (nzchar(insert)) c("11", "13", "33") else ""
-  variants <- variants[dir.exists(file.path(run_dir, "results", ifelse(nzchar(variants), paste0("insert", variants), "")))]
+  variants <- variants[vapply(file.path(run_dir, "results", ifelse(nzchar(variants), paste0("insert", variants), "")), has_results, TRUE)]
   sim_curves <- do.call(rbind, lapply(variants, function(v) {
     d <- read_top(file.path(run_dir, "results", if (nzchar(v)) paste0("insert", v) else ""))
     if (is.null(d)) NULL else cbind(d, insert = if (nzchar(v)) v else "all positions")
