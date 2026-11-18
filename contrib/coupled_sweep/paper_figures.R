@@ -44,6 +44,7 @@ RANK_BY       <- "xcor"         # "xcor" = NRMSE of the cross-correlation; "mean
 TOP_FRACTION  <- 0.25           # candidates: the best this fraction of architectures in selection 2 ...
 NRMSE_CUTOFF  <- NA             # ... or, if a number, every architecture with NRMSE below it
 HEATMAP_LAG   <- 120            # heatmap lag range, minutes
+MAX_HEATMAP_ROWS <- 20000       # heatmaps: above this many passing simulations, the best one per architecture is drawn
 TOP_CURVES    <- Inf            # figure 6: this many best architectures of selection 2 (Inf = all)
 PANELS_PER_PAGE <- 24           # figure 6: panels per page (6 rows of 4); one multi-page PDF, one PNG per page
 INSERT_COLOURS <- c(`11` = "#2a78d6", `13` = "#eb6834", `33` = "#1baf7a")   # figure 6: insert-step variants
@@ -397,6 +398,11 @@ write.csv(selected2, file.path(out, "4_selection2_folds_in_data_range.csv"), row
 
 heatmap <- function(selected, title) {
   if (!nrow(selected)) return(ggplot() + annotate("text", x = 0, y = 0, label = "no simulations") + theme_void())
+  if (nrow(selected) > MAX_HEATMAP_ROWS) {               # too many rows to draw: the best per architecture
+    selected <- selected[order(selected$rank_value), ]
+    selected <- selected[!duplicated(selected$model_id), ]
+    title <- paste0(title, sprintf(" (more than %s: best parameter set per architecture shown)", format(MAX_HEATMAP_ROWS, big.mark = ",")))
+  }
   selected <- selected[order(selected$group, selected$rank_value), ]
   selected$row <- ave(seq_len(nrow(selected)), selected$group, FUN = seq_along)
   d <- merge(eg[eg$sim_id %in% selected$sim_id & abs(eg$lag_min) <= HEATMAP_LAG, ], selected[, c("sim_id", "group", "row")])
