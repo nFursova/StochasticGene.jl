@@ -1590,9 +1590,56 @@ function predictedarray(r, data::DwellTimeData, model::AbstractGeneTransitionMod
     predictedarray(r, get_components(model, data), data.bins, get_reporter(model, data), data.DTtypes; steady_state_solver=steady_state_solver, method=model.method)
 end
 
+"""
+    _coupled_dwell_layout(data::DwellTimeData, reporter)
+
+Map dwell-time data onto the per-unit layout used by the coupled predictors.
+
+`load_data` stores dwell-time histograms as flat lists (`data.bins[i]`, `data.DTtypes[i]`,
+one entry per file), while the coupled predictors index `bins[α][i]` and `dttype[α][i]` for
+every unit `α` of the coupled model. Flat data are assigned, in order, to the observed units
+`data.units` (each taking as many histograms as it has sojourn sets); hidden units get empty
+lists, so no dwell times are computed for them. Data that are already nested per unit are
+returned unchanged. Returns `(bins, dttype, observed, nested)`.
+"""
+function _coupled_dwell_layout(data::DwellTimeData, reporter)
+    sojourn = reporter[1]
+    nunits = length(sojourn)
+    observed = isempty(data.units) ? collect(1:nunits) : collect(Int, data.units)
+    nested = !isempty(data.bins) && first(data.bins) isa AbstractVector && !isempty(first(data.bins)) &&
+             first(first(data.bins)) isa AbstractVector
+    nested && return data.bins, data.DTtypes, collect(1:nunits), true
+    all(u -> 1 <= u <= nunits, observed) ||
+        throw(ArgumentError("dwell-time data units $(observed) are outside 1:$nunits"))
+    counts = [length(sojourn[u]) for u in observed]
+    length(data.bins) == sum(counts) ||
+        throw(ArgumentError("dwell-time data have $(length(data.bins)) histograms but observed units $(observed) need $(sum(counts))"))
+    bins = [Vector{Vector{Float64}}() for _ in 1:nunits]
+    dttype = [String[] for _ in 1:nunits]
+    k = 0
+    for (u, n) in zip(observed, counts)
+        for i in 1:n
+            k += 1
+            push!(bins[u], Float64.(data.bins[k]))
+            # DTtypes is either one entry per histogram or one per-unit list shared by all units
+            push!(dttype[u], String(length(data.DTtypes) == sum(counts) ? data.DTtypes[k] : data.DTtypes[i]))
+        end
+    end
+    return bins, dttype, observed, false
+end
+
 function predictedarray(r, data::DwellTimeData, model::AbstractGRSMmodel{T}; steady_state_solver::Symbol=:default) where {T<:NamedTuple{(:coupling,)}}
     r, coupling_strength = prepare_rates_coupled(r, model.nrates, model.trait.coupling.couplingindices)
-    predictedarray(r, coupling_strength, get_components(model, data), data.bins, get_reporter(model, data), data.DTtypes; steady_state_solver=steady_state_solver, method=model.method)
+    components = get_components(model, data)
+    reporter = get_reporter(model, data)
+    components isa TDCoupledFullComponents ||
+        return predictedarray(r, coupling_strength, components, data.bins, reporter, data.DTtypes; steady_state_solver=steady_state_solver, method=model.method)
+    bins, dttype, observed, nested = _coupled_dwell_layout(data, reporter)
+    hists = predictedarray(r, coupling_strength, components, bins, reporter, dttype; steady_state_solver=steady_state_solver, method=model.method)
+    nested && return hists
+    # Flat data: one flat list of histograms for the observed units, in data order
+    # (the same shape as the single-unit predictor, so `make_array` matches `datahistogram`).
+    return reduce(vcat, [hists[u] for u in observed])
 end
 
 # --- `predictedarray_ad` entry points for `AbstractHistogramData` (Zygote / `get_rates_ad` only) ---
@@ -1854,6 +1901,11 @@ function predictedarray(r, coupling_strength, components::TDCoupledFullComponent
     hists = Vector{Vector}[]
     for α in eachindex(sojourn_full)
         h = Vector[]
+        # Hidden (unobserved) units carry no bins: nothing to predict for them.
+        if α > length(bins) || isempty(bins[α])
+            push!(hists, h)
+            continue
+        end
         for i in eachindex(sojourn_full[α])
             soj = sojourn_full[α][i]
             TCD = make_mat_TCD(components, α, i, r, coupling_rates)
@@ -2471,7 +2523,9 @@ function num_all_parameters(transitions, R::Int, S, insertstep, reporter, coupli
     if typeof(reporter) <: HMMReporter
         n = reporter.n
     elseif typeof(reporter) <: Vector
-        n = length(reporter)
+        # A vector of numbers is a noise-prior vector. A vector of state sets (the dwell-time
+        # sojourn lists of a coupled unit) carries no noise parameters.
+        n = all(x -> x isa Real, reporter) ? length(reporter) : 0
     elseif typeof(reporter) <: Int
         n = reporter
     else

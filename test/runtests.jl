@@ -1231,6 +1231,61 @@ const FULL_TESTS = get(ENV, "STOCHASTICGENE_FULL_TESTS", "0") == "1"
         end
     end
 
+    @testset "Coupled dwell-time fit with a hidden unit" begin
+        # Sojourn-set reporters (vectors of state vectors) carry no noise parameters.
+        @test StochasticGene.num_all_parameters(([1, 2], [2, 1]), 3, 0, 1, [[1, 2], [3]]) ==
+              StochasticGene.num_rates(([1, 2], [2, 1]), 3, 0, 1)
+        @test StochasticGene.num_all_parameters(([1, 2], [2, 1]), 3, 0, 1, [0.1, 0.2]) ==
+              StochasticGene.num_rates(([1, 2], [2, 1]), 3, 0, 1) + 2
+
+        # Hidden regime unit (G=2, R=0) activates OFF->ON of an observed G2R3 unit.
+        G = (2, 2); R = (0, 3); S = (0, 0); insertstep = (1, 1)
+        transitions = (([1, 2], [2, 1]), ([1, 2], [2, 1]))
+        coupling = ((1, 2), [(1, 2, 2, 1)], [:activate])
+        r = [0.02, 0.05, 1.0, 0.03, 0.02, 0.3, 0.5, 0.9375, 0.9375, 0.9375, 0.03, 9.0]
+        d = 5 / 3
+        bON = collect(d:d:40d); bOFF = collect(d:d:120d)
+        ds = [(unit=2, onstates=[Int[], Int[]], dttype=["ON", "OFF"], bins=[bON, bOFF])]
+        pdf = StochasticGene.test_CDT_full(r, transitions, G, R, S, insertstep, ds, coupling)[1]
+
+        # Flat data (as read from ON/OFF files) map onto the observed unit only.
+        data = StochasticGene.DwellTimeData("t", "t", [bON, bOFF], [pdf[1], pdf[2]], ["ON", "OFF"], [2])
+        reporter = ([[[2], [1]], [[3, 4], [1, 2]]], nothing)
+        bins, dttype, observed, nested = StochasticGene._coupled_dwell_layout(data, reporter)
+        @test !nested && observed == [2]
+        @test isempty(bins[1]) && bins[2] == [bON, bOFF] && dttype[2] == ["ON", "OFF"]
+
+        mktempdir() do root
+            mkpath(joinpath(root, "data", "dwell"))
+            files = String[]
+            for (name, b, p) in (("ON", bON, pdf[1]), ("OFF", bOFF, pdf[2]))
+                f = joinpath(root, "data", "dwell", "x_$(name).csv")
+                open(f, "w") do io
+                    println(io, "bin,count")
+                    for (x, q) in zip(b, p)
+                        println(io, x, ",", round(Int, 2000q))
+                    end
+                end
+                push!(files, joinpath("dwell", "x_$(name).csv"))
+            end
+            fits, stats, measures, data, model, options = fit(;
+                datatype="dwelltime", datapath=files, gene="MYC", cell="", datacond="x",
+                resultfolder="coupled-dwell", label="coupled-dwell", root=root,
+                G=G, R=R, S=S, insertstep=insertstep, transitions=transitions, coupling=coupling,
+                onstates=[[[2], [2]], [Int[], Int[]]],
+                dwell_specs=[(unit=2, onstates=[Int[], Int[]], dttype=["ON", "OFF"])],
+                noisepriors=[Float64[], Float64[]],
+                fittedparam=[1, 2, 5, 6, 7, 8, 9, 10, 12],
+                priormean=r, priorcv=fill(1.0, length(r)), decayrate=0.03,
+                nchains=1, maxtime=20.0, samplesteps=200, warmupsteps=0, propcv=0.02)
+            @test isfinite(fits.llml)
+            @test length(fits.parml) == 9
+            # Loglikelihood at the generating rates is finite and uses all bins of the observed unit.
+            ll, logpred = StochasticGene.loglikelihood(StochasticGene.get_param(model), data, model)
+            @test isfinite(ll) && length(logpred) == length(bON) + length(bOFF)
+        end
+    end
+
     @testset "CombinedData RNA+dwell reporter components" begin
         transitions = ([1, 2], [2, 1], [2, 3], [3, 2])
         G, R, S, insertstep = 3, 2, 2, 1
