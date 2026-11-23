@@ -2,10 +2,10 @@
 #
 # Model types 2, one splice step or splicing at every step:
 #   R/I = 301, 401, 501 (insertstep 1): S = 1 (splice at R1)  and  S = R (splice at R1..R)
-#   R/I = 303, 404, 505 (insertstep R): S = R (one splice at the last step; the only option
-#                                       StochasticGene allows when insertstep = R)
-#   -> 9 layouts x (2none, 3none, 3cyc, 3kp, 2gior) = 45 models per data unit, e.g.
-#      2311none, 2331none, 2333none, 3441kp, 2551gior
+#   -> 6 layouts x (2none, 3none, 3cyc, 3kp, 2gior) = 30 models per data unit, e.g.
+#      2311none, 2331none, 3441kp, 2551gior
+#   303, 404, 505 (insertstep R) are not staged with splicing: in fit() their splice rate never
+#   enters the likelihood (see dwelltime_staging_common.jl).
 #
 # Layout:
 #   data    <SG_DWELL_ROOT>/<source>/<sample>_enhancer_<DT>.csv

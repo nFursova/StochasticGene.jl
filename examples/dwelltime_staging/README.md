@@ -6,14 +6,14 @@ Copy the folder next to your other staging scripts (e.g. `scripts/`).
 | script | data | models | runs (default) |
 |---|---|---|---|
 | `08_stage_dwelltime_types1.jl` | MYC (gene) + CCAT1 (enhancer), 3Prime + 5Prime | types 1 | 2 folders x 90 = 180 |
-| `09_stage_dwelltime_types2_ccat1.jl` | CCAT1, 3Prime + 5Prime | types 2 | 1 folder x 90 = 90 |
+| `09_stage_dwelltime_types2_ccat1.jl` | CCAT1, 3Prime + 5Prime | types 2 | 1 folder x 60 = 60 |
 | `10_stage_crispr_types1.jl` | CRISPR UNT/VPR/shKRAB/KRAB, MYC + CCAT1, 5Prime | types 1 | 7 units x 45 = 315 |
-| `11_stage_crispr_types2_ccat1.jl` | CRISPR, CCAT1 (KRAB has none), 5Prime | types 2 | 3 units x 45 = 135 |
+| `11_stage_crispr_types2_ccat1.jl` | CRISPR, CCAT1 (KRAB has none), 5Prime | types 2 | 3 units x 30 = 90 |
 
 All scripts use only the model-based ON/OFF times (`dwelltimes/model/...`), not the raw
 segmentation. `SG_SOURCES=model,segm` brings segm back if ever needed.
 
-## Models (45 per data unit)
+## Models (types 1: 45, types 2: 30 per data unit)
 
 Names are `<G><R><S><I><topology>`, with G, R, S, insertstep exactly as passed to StochasticGene.
 
@@ -28,12 +28,12 @@ Names are `<G><R><S><I><topology>`, with G, R, S, insertstep exactly as passed t
 | x301 | S=1 (`x311`) | S=3 (`x331`) |
 | x401 | S=1 (`x411`) | S=4 (`x441`) |
 | x501 | S=1 (`x511`) | S=5 (`x551`) |
-| x303, x404, x505 | single splice at the last step: `x333`, `x444`, `x555` | same model |
 
-In StochasticGene, `S` is the last R step that can splice and splicing happens only at steps
-`insertstep..S`. With insertstep = R the only possible site is the last step, so "one" and "all"
-are the same model there. (`S=1` with insertstep > 1 would add a splice rate that never enters the
-likelihood.)
+x303, x404 and x505 are **not** staged with splicing. `fit()` resets `S` to at most
+`R - insertstep + 1` (`reset_S`), while the matrix builder splices only at steps `j <= S` (and at
+the last step only if `S == R`). With insertstep = R no setting reaches the last step, so the
+splice rate would be a dead parameter (the loglikelihood of `2333none` is identical for splice
+rates 0.001, 1 and 10). Fixing this needs a change in StochasticGene.
 
 **`gior`** (double-regime model) is staged as a coupled model: a hidden 2-state regime unit
 (G=2, R=0; k_f, k_b) and the observed promoter unit (G=2 with the R/S/I of the name). In the

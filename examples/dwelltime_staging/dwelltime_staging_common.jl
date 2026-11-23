@@ -18,12 +18,13 @@
 #         The G digit of a gior name is the promoter's G (=2). One gior model is staged for each
 #         R/S/I combination of the 3-state list.
 #
-# Splicing (model types 2). In StochasticGene, S is the LAST R step that can splice, and
-# splicing is possible at steps insertstep..S (one rate each). Hence
-#   insertstep = 1:  S = 1 -> one splice site at R1 ("simple")
-#                    S = R -> splicing at every step R1..R ("recursive")
-#   insertstep = R:  S = R -> one splice site at the last step (simple = recursive)
-# (S = 1 with insertstep > 1 would add a splice rate that never enters the likelihood.)
+# Splicing (model types 2) is staged only for insertstep = 1:
+#   S = 1 -> one splice site at R1 ("simple");  S = R -> splicing at every step R1..R ("recursive")
+# Splicing with insertstep > 1 is not staged: fit() resets S to at most R - insertstep + 1
+# (reset_S), while the matrix builder only splices at steps j <= S (and at the last step only if
+# S == R). With insertstep = R no S value reaches the last step, so the splice rate would never
+# enter the likelihood (checked: the loglikelihood of 2333none is identical for splice rates
+# 0.001, 1 and 10).
 #
 # Dwell types: dttype ON/OFF with onstates = [] => ON = at least one unspliced reporter-bearing
 # R step occupied (RNA visible), OFF = none. For gior the ON/OFF times are those of unit 2.
@@ -97,9 +98,9 @@ const GIOR_PROMOTER_TRANSITIONS = ([1, 2], [2, 1]) # k_on (OFF->ON), k_off (ON->
 
 # (R, insertstep) combinations
 const RI_TYPES1 = [(3, 1), (3, 2), (3, 3), (4, 1), (4, 3), (4, 4), (5, 1), (5, 4), (5, 5)]
-const RI_TYPES2 = [(3, 1), (3, 3), (4, 1), (4, 4), (5, 1), (5, 5)]
+const RI_TYPES2 = [(3, 1), (4, 1), (5, 1)]   # insertstep 1 only (see the splicing note above)
 
-splice_options(R, I) = I == 1 ? [1, R] : (I == R ? [R] : error("splicing staged only for insertstep 1 or R (got R=$R, insertstep=$I)"))
+splice_options(R, I) = I == 1 ? [1, R] : error("splicing is staged only for insertstep 1 (got R=$R, insertstep=$I)")
 
 struct ModelSpec
     name::String

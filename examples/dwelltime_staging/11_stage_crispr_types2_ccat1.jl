@@ -1,5 +1,5 @@
 # Stage 12-hour ON/OFF dwell-time fits across CRISPR conditions, CCAT1 only, model types 2
-# (splicing; same 45 models as 09_stage_dwelltime_types2_ccat1.jl).
+# (splicing; same 30 models as 09_stage_dwelltime_types2_ccat1.jl).
 #
 # Layout:
 #   data    <SG_DWELL_ROOT>/<source>/<condition>/<sample>_enhancer_<DT>.csv
