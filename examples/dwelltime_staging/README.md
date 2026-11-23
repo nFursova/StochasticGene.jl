@@ -41,9 +41,15 @@ high regime OFF->ON is multiplied by (1 + gamma). ON/OFF times are those of the 
 Rate vector: `k_f, k_b, Eject1, Decay1 | promoter rates | gamma`; Eject1/Decay1 and the promoter
 Decay are not fitted. Priors: G rates 0.01 (CV 1), gamma 0.1 (CV 10).
 
-**gior runs need the fixed StochasticGene** from this branch (coupled dwell-time fits failed in
-`fit()` before; see the commit message). Non-gior runs work with the current release. To stage
-gior separately, use `SG_TOPOLOGIES=gior` (and `SG_TOPOLOGIES=none,cyc,kp` for the rest).
+**gior runs on an old StochasticGene (patch).** Released StochasticGene (checked 2.0.4 and
+2.0.7) cannot fit coupled models to dwell-time data: `fit()` crashes with
+`BoundsError ... index [[16]]`. `stochasticgene_coupled_dwell_patch.jl` fixes this at run time
+without reinstalling anything. Staging copies it into each swarm folder and adds
+`@everywhere include(".../stochasticgene_coupled_dwell_patch.jl")` to the gior fit scripts only,
+so every worker loads it. Each worker log then shows
+`Applied coupled dwell-time patch to StochasticGene <version>`. On a StochasticGene that already
+has the fix, the patch does nothing. Tested on 2.0.7 with `julia -p 2`. Set `SG_GIOR_PATCH=false`
+to leave the fit scripts untouched. Non-gior runs never load the patch.
 
 ## Run length
 
@@ -57,7 +63,7 @@ time by `SG_WALL_PAD_HOURS=2`.
 
 ```bash
 export SG_ROOT=/data/Larsonlab/Nadya/StochasticGene
-export SG_PROJECT=/data/$USER/sg201          # gior runs need the fixed StochasticGene (see above)
+export SG_PROJECT=/data/$USER/sg201          # your existing environment (gior runs load the patch)
 export SG_TAG=$(date +%F)-12h
 julia --project="$SG_PROJECT" -e 'using Pkg; Pkg.precompile()'
 

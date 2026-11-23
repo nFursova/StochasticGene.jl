@@ -321,6 +321,28 @@ function stage!(runs; swarmdir, default_resultfolder)
     end
     println("spec check        : all ", length(runs), " specs round-tripped ok")
 
+    # gior (coupled) runs: load the coupled dwell-time patch on every worker, so they also run
+    # on an unpatched StochasticGene (e.g. 2.0.7). The patch skips itself if the fix is present.
+    gior_keys = Set(r.key for r in runs if haskey(r, :coupling))
+    if !isempty(gior_keys) && envbool("SG_GIOR_PATCH", true)
+        patch_src = joinpath(@__DIR__, "stochasticgene_coupled_dwell_patch.jl")
+        isfile(patch_src) || error("patch file not found: $patch_src")
+        patch_dst = joinpath(abspath(swarmdir), basename(patch_src))
+        cp(patch_src, patch_dst; force=true)
+        npatched = 0
+        for (k, script) in zip(out.keys, out.scripts)
+            k in gior_keys || continue
+            lines = readlines(script)
+            i = findfirst(l -> occursin("using StochasticGene", l), lines)
+            i === nothing && error("$script: no `using StochasticGene` line to patch after")
+            insert!(lines, i + 1, "@everywhere include($(repr(patch_dst)))")
+            write(script, join(lines, "\n") * "\n")
+            npatched += 1
+        end
+        npatched == length(gior_keys) || error("patched $npatched of $(length(gior_keys)) gior fit scripts")
+        println("gior patch        : ", npatched, " fit scripts load ", patch_dst)
+    end
+
     # Same worker-startup guard as the earlier batches.
     if envbool("SG_WORKER_GUARD", true)
         for f in ("fit.swarm", "fit.commands")
