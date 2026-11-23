@@ -1,0 +1,91 @@
+# Double-regime, two-state promoter model as a COUPLED model
+# (Supplementary Sec. 4, Nat Genet 2026, "Enhancer control of promoter activity and
+#  variability via frequency modulation of clustered transcriptional bursts")
+#
+# A single GRS unit initiates RNA only from gene state G, so both "ON low" and
+# "ON high" cannot initiate. The model is written exactly as two units:
+#
+#   unit 1 (hidden, G=2, R=0): regime         1 = low  <-- k_f / k_b -->  2 = high
+#   unit 2 (observed, G=2, R=3): promoter     1 = OFF  <-- k_on / k_off --> 2 = ON
+#                                              ON initiates -> R1 -> R2 -> R3 -> eject
+#
+#   coupling (1, 2, 2, 1): while unit 1 is in state 2 (high), transition 1 of
+#   unit 2 (OFF -> ON) is multiplied by (1 + gamma)
+#       k_on^L = Rate_12 (unit 2),   k_on^H = Rate_12 * (1 + gamma)
+#   k_off, initiation, elongation and eject are identical in both regimes.
+#
+# Dwell times (unit 2): ON = any R step occupied (RNA visible), OFF = no RNA visible.
+# ON duration ~ sum(1/Rshift) + 1/Eject = elongation time (3 x 1/0.9375 = 3.2 min).
+#
+# Flat rate vector (model 1 block, model 2 block, then coupling):
+#   1  k_f        regime low  -> high       fitted
+#   2  k_b        regime high -> low        fitted
+#   3  Eject      unit 1 (R=0, unused)      fixed
+#   4  Decay      unit 1 (unused)           fixed
+#   5  Rate_12    k_on^L  OFF -> ON         fitted
+#   6  Rate_21    k_off   ON  -> OFF        fitted
+#   7  Initiate                             fitted
+#   8  Rshift_1                             fitted
+#   9  Rshift_2                             fitted
+#  10  Eject                                fitted
+#  11  Decay      mRNA decay                fixed
+#  12  gamma      coupling (activate, > 0)  fitted
+
+[run]
+  key = "3Prime-dt-doubleregime-gene"
+  label = "3Prime-dt-doubleregime-gene"
+  resultfolder = "dwelltime-model-doubleregime"
+  root = "/data/Larsonlab/Nadya/StochasticGene"
+  gene = "MYC"
+  cell = "HBEC"
+  datacond = "gene"
+
+  # ---- data (ON file first, then OFF, matching dttype order) ----
+  datatype = "dwelltime"
+  datapath = ["dwelltimes/model/3Prime_gene_ON.csv", "dwelltimes/model/3Prime_gene_OFF.csv"]
+
+  # ---- model: per-model tuples (model 1 = regime, model 2 = promoter) ----
+  G = [2, 2]
+  R = [0, 3]
+  S = [0, 0]
+  insertstep = [1, 1]
+  transitions = [
+    [[1, 2], [2, 1]],
+    [[1, 2], [2, 1]]
+  ]
+  elongationtime = [1.0, 3.2]
+  nalleles = 1
+  splicetype = ""
+
+  # coupling = (unit_model, connections (beta, s, alpha, t), sign modes)
+  coupling_unit_model = [1, 2]
+  coupling_connections = [[1, 2, 2, 1]]
+  coupling_modes = ["activate"]
+
+  # Per-unit onstates (unit 1 hidden: explicit G state; unit 2: [] = R-step ON)
+  onstates = [[[2], [2]], [[], []]]
+
+  # ---- parameters ----
+  fittedparam = [1, 2, 5, 6, 7, 8, 9, 10, 12]
+  fixedeffects = []
+  #          kf    kb    ej1  dec1  kon   koff  Init  Rs1     Rs2     Eject   Decay                 gamma
+  priormean = [0.01, 0.01, 1.0, 1.0, 0.01, 0.01, 0.2, 0.9375, 0.9375, 0.9375, 0.03165055618995184, 1.0]
+  priorcv   = [1.0,  1.0,  1.0, 1.0, 1.0,  1.0,  0.25, 0.25,  0.25,   0.25,   0.1,                 1.0]
+  decayrate = 0.03165055618995184
+
+  # ---- inference (same settings as the 3-state dwell-time run) ----
+  inference_method = "mh"
+  nchains = 16
+  maxtime = 32400.0
+  samplesteps = 2000000
+  warmupsteps = 0
+  sample_stride = 100
+  propcv = 0.02
+  ratetype = "ml"
+  writesamples = true
+
+  # ---- observed unit dwell spec (keep last: keys after this header belong to it) ----
+  [[run.dwell_specs]]
+    unit = 2
+    onstates = [[], []]
+    dttype = ["ON", "OFF"]
