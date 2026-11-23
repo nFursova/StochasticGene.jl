@@ -1,0 +1,102 @@
+# Double-regime, two-state promoter model
+# (Supplementary Sec. 4, "Enhancer control of promoter activity and variability
+#  via frequency modulation of clustered transcriptional bursts", Nat Genet 2026)
+#
+# Gene-state numbering used here:
+#
+#     2 = ON  low   <--- k_f / k_b --->   4 = ON  high
+#      ^ |                                  ^ |
+# k_onL| |k_off                        k_onH| |k_off
+#      | v                                  | v
+#     1 = OFF low   <--- k_f / k_b --->   3 = OFF high
+#
+# Rate vector (StochasticGene order = transitions in listed order, then eject, then decay):
+#   1  [1,2]  k_on^L   OFF-low  -> ON-low
+#   2  [2,1]  k_off    ON-low   -> OFF-low
+#   3  [3,4]  k_on^H   OFF-high -> ON-high
+#   4  [4,3]  k_off    ON-high  -> OFF-high     (tied to 2)
+#   5  [1,3]  k_f      OFF-low  -> OFF-high
+#   6  [3,1]  k_b      OFF-high -> OFF-low
+#   7  [2,4]  k_f      ON-low   -> ON-high      (tied to 5)
+#   8  [4,2]  k_b      ON-high  -> ON-low       (tied to 6)
+#   9  eject  mu       (R = 0 models eject ONLY from state G = 4, see the note below)
+#  10  decay  delta    nascent RNA release
+#
+# Paper's 7 free parameters -> k_on^L, k_on^H, k_off, k_f, k_b, mu, delta
+#   = rates 1, 3, 2, 5, 6, 9, 10 (4, 7, 8 are tied with fixedeffects).
+#
+# NOTE ON mu: with R = 0, StochasticGene transcribes only from the last G state,
+# so ON-low (state 2) cannot also produce RNA at rate mu. This spec therefore fits
+# gene-state dwell times (burst = time in ON states {2,4}, inter-burst = time in
+# OFF states {1,3}), which mu and delta do not affect. They are kept in the rate
+# vector but are not fitted.
+
+[run]
+  key = "double_regime_5kb"
+  resultfolder = "double_regime"
+  root = "."
+  label = "double_regime"
+  gene = "reporter"
+  datacond = "5kb"
+
+  # ---- data: burst / inter-burst duration histograms ----
+  # Each file has two columns: bin (time) and count (or density).
+  # Order must match dttype below: first ON (burst), then OFF (inter-burst).
+  datatype = "dwelltime"
+  datapath = ["data/double_regime/5kb_burst_durations.csv",
+              "data/double_regime/5kb_interburst_durations.csv"]
+
+  # ---- model topology ----
+  G = 4
+  R = 0
+  S = 0
+  insertstep = 1
+  nalleles = 1
+  transitions = [
+    [1, 2],
+    [2, 1],
+    [3, 4],
+    [4, 3],
+    [1, 3],
+    [3, 1],
+    [2, 4],
+    [4, 2]
+  ]
+
+  # Burst = promoter in either ON state; inter-burst = either OFF state.
+  # ONG/OFFG = dwell times defined on G states (correct dwell types for R = 0).
+  onstates = [[2, 4], [2, 4]]
+  # (per-unit dwell spec with the same onstates is at the END of this file,
+  #  since keys after a [[table]] header belong to that table)
+
+  # ---- parameter tying (first index is fitted, the rest copy it) ----
+  #   k_off(ON-high) = k_off(ON-low), k_f(ON) = k_f(OFF), k_b(ON) = k_b(OFF)
+  fixedeffects = [
+    [2, 4],
+    [5, 7],
+    [6, 8]
+  ]
+  # Free parameters for a dwell-time fit: k_on^L, k_off, k_on^H, k_f, k_b
+  fittedparam = [1, 2, 3, 5, 6]
+
+  # ---- priors (placeholder values in 1/min; replace with your own) ----
+  # Tied rates must have the same prior mean.
+  #            konL  koff  konH  koff  kf    kb    kf    kb    mu   delta
+  priormean = [0.01, 0.5,  0.2,  0.5,  0.01, 0.02, 0.01, 0.02, 1.0, 0.5]
+  priorcv = 10.0
+  decayrate = 0.5
+
+  # ---- inference ----
+  inference_method = "mh"
+  nchains = 4
+  warmupsteps = 5000
+  samplesteps = 100000
+  maxtime = 3600.0
+  propcv = 0.05
+  writesamples = false
+
+  # ---- dwell-time spec (must stay last: keys after this header belong to it) ----
+  [[run.dwell_specs]]
+    unit = 1
+    onstates = [[2, 4], [2, 4]]
+    dttype = ["ONG", "OFFG"]
