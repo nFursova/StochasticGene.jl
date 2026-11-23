@@ -5,16 +5,16 @@
 # Layout (same as 07_swarm_dwelltime_conditions.jl):
 #   data    <SG_DWELL_ROOT>/<source>/<condition>/<sample>_<datacond>_<DT>.csv
 #   folder  results/CRISPR-dwelltime-types1-<SG_TAG>          (one folder; keys separate units)
-#   key     <source>-<condition>-<sample>-<datacond>-<model>   e.g. segm-UNT-5Prime-gene-3301kp
+#   key     <source>-<condition>-<sample>-<datacond>-<model>   e.g. model-UNT-5Prime-gene-3301kp
 # Units without files (e.g. KRAB enhancer) are skipped.
 #
 # Environment (defaults):
-#   SG_SOURCES=segm,model  SG_CRISPR_CONDITIONS=UNT,VPR,shKRAB,KRAB  SG_SAMPLES_LIST=5Prime
+#   SG_SOURCES=model  SG_CRISPR_CONDITIONS=UNT,VPR,shKRAB,KRAB  SG_SAMPLES_LIST=5Prime
 #   SG_DATACONDS=gene,enhancer  plus everything listed in 08_stage_dwelltime_types1.jl
 
 include(joinpath(@__DIR__, "dwelltime_staging_common.jl"))
 
-const SOURCES = csvlist("SG_SOURCES", "segm,model")
+const SOURCES = csvlist("SG_SOURCES", "model")
 const CONDITIONS = csvlist("SG_CRISPR_CONDITIONS", "UNT,VPR,shKRAB,KRAB")
 const SAMPLES = csvlist("SG_SAMPLES_LIST", "5Prime")
 const DATACONDS = csvlist("SG_DATACONDS", "gene,enhancer")

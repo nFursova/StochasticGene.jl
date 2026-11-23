@@ -5,10 +5,13 @@ Copy the folder next to your other staging scripts (e.g. `scripts/`).
 
 | script | data | models | runs (default) |
 |---|---|---|---|
-| `08_stage_dwelltime_types1.jl` | MYC (gene) + CCAT1 (enhancer), sources model + segm, 3Prime + 5Prime | types 1 | 4 folders x 90 = 360 |
-| `09_stage_dwelltime_types2_ccat1.jl` | CCAT1, sources model + segm, 3Prime + 5Prime | types 2 | 2 folders x 90 = 180 |
-| `10_stage_crispr_types1.jl` | CRISPR UNT/VPR/shKRAB/KRAB, MYC + CCAT1, 5Prime | types 1 | 14 units x 45 = 630 |
-| `11_stage_crispr_types2_ccat1.jl` | CRISPR, CCAT1 (KRAB has none), 5Prime | types 2 | 6 units x 45 = 270 |
+| `08_stage_dwelltime_types1.jl` | MYC (gene) + CCAT1 (enhancer), 3Prime + 5Prime | types 1 | 2 folders x 90 = 180 |
+| `09_stage_dwelltime_types2_ccat1.jl` | CCAT1, 3Prime + 5Prime | types 2 | 1 folder x 90 = 90 |
+| `10_stage_crispr_types1.jl` | CRISPR UNT/VPR/shKRAB/KRAB, MYC + CCAT1, 5Prime | types 1 | 7 units x 45 = 315 |
+| `11_stage_crispr_types2_ccat1.jl` | CRISPR, CCAT1 (KRAB has none), 5Prime | types 2 | 3 units x 45 = 135 |
+
+All scripts use only the model-based ON/OFF times (`dwelltimes/model/...`), not the raw
+segmentation. `SG_SOURCES=model,segm` brings segm back if ever needed.
 
 ## Models (45 per data unit)
 
@@ -54,7 +57,7 @@ time by `SG_WALL_PAD_HOURS=2`.
 
 ```bash
 export SG_ROOT=/data/Larsonlab/Nadya/StochasticGene
-export SG_PROJECT=/data/$USER/sg201          # environment with the fixed StochasticGene
+export SG_PROJECT=/data/$USER/sg201          # gior runs need the fixed StochasticGene (see above)
 export SG_TAG=$(date +%F)-12h
 julia --project="$SG_PROJECT" -e 'using Pkg; Pkg.precompile()'
 
@@ -70,7 +73,7 @@ Each script prints one `submit` line per swarm folder, e.g.
 cd $SG_ROOT/swarm-dwelltime-model-gene-types1-$SG_TAG && swarm -f fit.swarm -g 32 -t 18 --time 14:00:00 --module julialang --logdir logs
 ```
 
-Useful filters: `SG_MODELS=3301kp,2301gior`, `SG_TOPOLOGIES=none,kp`, `SG_SOURCES=model`,
+Useful filters: `SG_MODELS=3301kp,2301gior`, `SG_TOPOLOGIES=none,kp`,
 `SG_DATACONDS=gene`, `SG_SAMPLES_LIST=5Prime`, `SG_CRISPR_CONDITIONS=UNT,VPR`.
 Prior settings: `SG_ELONGATION_GENE=3.2`, `SG_ELONGATION_ENHANCER=22`, `SG_PRIORCV_R=0.25`,
 `SG_PRIORCV_G=1`, `SG_SPLICE_PRIOR=0.05`, `SG_PRIORCV_SPLICE=0.2`, `SG_GIOR_GAMMA=0.1`,

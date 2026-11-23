@@ -12,7 +12,7 @@
 #   swarm   swarm-dwelltime-<source>-<datacond>-types1-<SG_TAG>/fit.swarm  (one per folder)
 #
 # Environment (defaults):
-#   SG_SOURCES=model,segm  SG_DATACONDS=gene,enhancer  SG_SAMPLES_LIST=3Prime,5Prime
+#   SG_SOURCES=model  SG_DATACONDS=gene,enhancer  SG_SAMPLES_LIST=3Prime,5Prime
 #   SG_TOPOLOGIES=none,cyc,kp,gior  SG_MODELS=(all)  SG_TAG=<date>-12h
 #   SG_MAXTIME=43200  SG_SAMPLESTEPS=10^12  SG_SAMPLE_STRIDE=1000  SG_NCHAINS=16
 #   SG_ELONGATION_GENE=3.2  SG_ELONGATION_ENHANCER=22  SG_PRIORCV_R=0.25
@@ -20,7 +20,7 @@
 
 include(joinpath(@__DIR__, "dwelltime_staging_common.jl"))
 
-const SOURCES = csvlist("SG_SOURCES", "model,segm")
+const SOURCES = csvlist("SG_SOURCES", "model")
 const DATACONDS = csvlist("SG_DATACONDS", "gene,enhancer")
 const SAMPLES = csvlist("SG_SAMPLES_LIST", "3Prime,5Prime")
 

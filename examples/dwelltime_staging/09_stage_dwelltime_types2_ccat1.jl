@@ -17,7 +17,7 @@
 
 include(joinpath(@__DIR__, "dwelltime_staging_common.jl"))
 
-const SOURCES = csvlist("SG_SOURCES", "model,segm")
+const SOURCES = csvlist("SG_SOURCES", "model")
 const DATACONDS = csvlist("SG_DATACONDS", "enhancer")
 const SAMPLES = csvlist("SG_SAMPLES_LIST", "3Prime,5Prime")
 
