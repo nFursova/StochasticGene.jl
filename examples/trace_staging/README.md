@@ -39,6 +39,20 @@ julia --project="$SG_PROJECT" scripts/12_stage_trace_separate_noise_gene.jl
 SG_FROM=3and5Prime-stage05-gene-$SG_STAMP julia --project="$SG_PROJECT" scripts/13_continue_trace_fixnoise.jl
 ```
 
+## Gene (MYC), joint fit: `14_stage_trace_joint_gene.jl`
+
+3Prime and 5Prime fitted together with **all kinetic rates shared** (`:top`), on the
+shared-parameter path of the stage-05 scripts (top -> sample -> trace): noise means per trace,
+noise SDs per sample, Rshift tied, same priors and 21 models as the separate gene script.
+Keys `3Prime-5Prime-trs-<model>-gene`, folder `3and5Prime-joint-gene-$SG_STAMP`.
+Stage B for this path is your `continue_shared_from_results_final.jl` (fixnoise mode);
+`13_continue_trace_fixnoise.jl` is for the classic path of scripts 12 only.
+
+```bash
+export SG_STAMP=$(date +%Y-%m-%d)
+julia --project="$SG_PROJECT" scripts/14_stage_trace_joint_gene.jl
+```
+
 ## Stage B: `13_continue_trace_fixnoise.jl`, freeze the noise, fit the kinetics
 
 For every finished stage-A run, from **its own** fit: all noise parameters (per trace and per
