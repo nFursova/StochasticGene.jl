@@ -26,6 +26,19 @@ julia --project="$SG_PROJECT" scripts/12_stage_trace_separate_noise.jl
 # prints: cd <swarm dir> && swarm -f fit.swarm -g 32 -t 18 --time 15:00:00 --module julialang --logdir logs
 ```
 
+## Gene (MYC): `12_stage_trace_separate_noise_gene.jl`
+
+Same as stage A for enhancer, without splicing: bases `3301 3302 3303 3401 3402 3403 3404` x
+`none cyc kp` = 21 models per sample (42 runs), MYC noise priors, folders
+`3and5Prime-stage05-gene-$SG_STAMP` and `swarm-3and5Prime-stage05-gene-$SG_STAMP`.
+
+```bash
+export SG_STAMP=$(date +%Y-%m-%d)
+julia --project="$SG_PROJECT" scripts/12_stage_trace_separate_noise_gene.jl
+# after the 12 h runs:
+SG_FROM=3and5Prime-stage05-gene-$SG_STAMP julia --project="$SG_PROJECT" scripts/13_continue_trace_fixnoise.jl
+```
+
 ## Stage B: `13_continue_trace_fixnoise.jl`, freeze the noise, fit the kinetics
 
 For every finished stage-A run, from **its own** fit: all noise parameters (per trace and per
