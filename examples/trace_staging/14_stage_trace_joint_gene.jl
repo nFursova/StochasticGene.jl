@@ -5,7 +5,8 @@
 #   kinetics    G, Initiate, Rshift/Eject, Decay       :top         one value for both samples
 #   noise       offsets 1, 3 (background / reporter mean) :individual  per trace
 #               offsets 2, 4 (background / reporter SD)   :group       per sample
-#   ties        all Rshift rates equal; Eject separate
+#   ties        all Rshift rates equal; Eject separate.
+#               SG_TIE_RSHIFT=false fits every Rshift rate separately (folder gets "-freeR")
 #   decay       not fitted
 #
 # Priors and models as in 12_stage_trace_separate_noise_gene.jl:
@@ -39,7 +40,8 @@ const CONDITION = "gene"
 const ROOT = abspath(envstr("SG_ROOT", "/data/Larsonlab/Nadya/StochasticGene"))
 const PROJECT = envstr("SG_PROJECT", "/data/$(get(ENV, "USER", "unknown"))/sg201")
 const STAMP = envstr("SG_STAMP", Dates.format(Dates.today(), "yyyy-mm-dd"))
-const RESULTFOLDER = envstr("SG_RESULTFOLDER", "3and5Prime-joint-gene-$STAMP")
+const TIE_RSHIFT = envbool("SG_TIE_RSHIFT", true)
+const RESULTFOLDER = envstr("SG_RESULTFOLDER", "3and5Prime-joint-gene-$STAMP" * (TIE_RSHIFT ? "" : "-freeR"))
 const SWARMDIR = joinpath(ROOT, envstr("SG_SWARMDIR", "swarm-" * RESULTFOLDER))
 
 const MAXTIME = envfloat("SG_MAXTIME", 43200.0)
@@ -126,8 +128,8 @@ end
 function fitted_and_ties(m)
     nt = length(m.transitions); n = nrates(m)
     rshift = collect(nt+2:nt+m.R)                  # Rshift_1..Rshift_{R-1}
-    kinetic = vcat(1:nt, nt + 1, rshift[1], nt + 1 + m.R)
-    ties = length(rshift) > 1 ? (rshift,) : tuple()
+    kinetic = vcat(1:nt, nt + 1, TIE_RSHIFT ? rshift[1:1] : rshift, nt + 1 + m.R)
+    ties = TIE_RSHIFT && length(rshift) > 1 ? (rshift,) : tuple()
     return sort(vcat(kinetic, n+1:n+4)), ties
 end
 
@@ -179,6 +181,7 @@ end
 
 const RUNS = [run_row(m) for m in MODELS]
 println("condition   : gene, 3Prime + 5Prime JOINT, all kinetic rates shared (:top)")
+println("priors      : Rshift 1/$RSHIFT_MINUTES min (CV $PRIORCV_R, $(TIE_RSHIFT ? "all tied" : "each free")), Eject $EJECT_RATE (CV $PRIORCV_EJECT)")
 println("traces      : ", join(["$s=$(NTRACES[s])" for s in SAMPLES], ", "))
 println("noise       : means per trace (:individual), SDs per sample (:group)")
 println("run length  : maxtime $MAXTIME s, samplesteps $SAMPLESTEPS (not limiting), stride $STRIDE")

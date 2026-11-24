@@ -7,7 +7,8 @@
 #               offsets 2, 4 (background SD, reporter SD)      -> fitted once per sample
 #   kinetics    one value per sample (shared by all traces of that sample)
 #   ties        all Rshift rates equal (Rshift_1 fitted, the others tied to it);
-#               Eject separate; all splice rates equal
+#               Eject separate; all splice rates equal.
+#               SG_TIE_RSHIFT=false fits every Rshift rate separately (folder gets "-freeR")
 #   decay       not fitted
 #
 # Priors (rates per minute):
@@ -44,6 +45,7 @@
 #   SG_RSHIFT_MINUTES=2.5 SG_PRIORCV_R=0.25 SG_EJECT_RATE=1.0 SG_PRIORCV_EJECT=0.25
 #   SG_PRIOR_G=0.01 SG_PRIORCV_G=1.0 SG_PRIOR_INITIATE=0.2 SG_PRIORCV_INITIATE=0.25
 #   SG_SPLICE_PRIOR=0.05 SG_PRIORCV_SPLICE=0.2 SG_NOISE_INDIVIDUAL=1,3 SG_NOISE_SHARED=2,4
+#   SG_TIE_RSHIFT=true
 
 using StochasticGene
 using Dates
@@ -61,7 +63,9 @@ const CONDITION = envstr("SG_CONDITION", "enhancer")
 CONDITION in ("gene", "enhancer") || error("SG_CONDITION must be gene or enhancer")
 const SAMPLES = csvlist("SG_SAMPLES_LIST", "3Prime,5Prime")
 const TAG = envstr("SG_TAG", string(Dates.today()))
-const RESULTFOLDER = envstr("SG_RESULTFOLDER", "trace-separate-$CONDITION-noise-$TAG")
+const TIE_RSHIFT = envbool("SG_TIE_RSHIFT", true)
+const RSHIFT_SUFFIX = TIE_RSHIFT ? "" : "-freeR"
+const RESULTFOLDER = envstr("SG_RESULTFOLDER", "trace-separate-$CONDITION-noise-$TAG$RSHIFT_SUFFIX")
 const SWARMDIR = joinpath(ROOT, envstr("SG_SWARMDIR", "swarm-" * RESULTFOLDER))
 
 const MAXTIME = envfloat("SG_MAXTIME", 43200.0)
@@ -167,9 +171,10 @@ end
 function fitted_and_ties(m)
     L = layout(m)
     ties = Vector{Int}[]
-    length(L.rshift) > 1 && push!(ties, L.rshift)          # all Rshift rates equal
+    TIE_RSHIFT && length(L.rshift) > 1 && push!(ties, L.rshift)   # all Rshift rates equal
     length(L.splice) > 1 && push!(ties, L.splice)          # all splice rates equal
-    kinetic = vcat(L.G, L.initiate, isempty(L.rshift) ? Int[] : [L.rshift[1]], L.eject,
+    rshift_fit = TIE_RSHIFT ? (isempty(L.rshift) ? Int[] : [L.rshift[1]]) : L.rshift
+    kinetic = vcat(L.G, L.initiate, rshift_fit, L.eject,
                    isempty(L.splice) ? Int[] : [L.splice[1]])
     individual = L.n .+ NOISE_INDIVIDUAL
     shared_noise = L.n .+ NOISE_SHARED
@@ -230,7 +235,7 @@ println("condition         : ", CONDITION, " (each sample fitted separately, not
 println("traces            : ", join(["$s=$(NTRACES[s]) ($(datapath(s)))" for s in SAMPLES], ", "))
 println("noise per trace   : offsets ", NOISE_INDIVIDUAL, "   per sample: offsets ", NOISE_SHARED)
 println("priors            : G $PRIOR_G (CV $PRIORCV_G), Initiate $PRIOR_INITIATE (CV $PRIORCV_INITIATE), ",
-        "Rshift 1/$RSHIFT_MINUTES min (CV $PRIORCV_R, all tied), Eject $EJECT_RATE (CV $PRIORCV_EJECT), ",
+        "Rshift 1/$RSHIFT_MINUTES min (CV $PRIORCV_R, $(TIE_RSHIFT ? "all tied" : "each free")), Eject $EJECT_RATE (CV $PRIORCV_EJECT), ",
         "splice $SPLICE_PRIOR (CV $PRIORCV_SPLICE, all tied)")
 println("run length        : maxtime $MAXTIME s, samplesteps $SAMPLESTEPS (not limiting), stride $STRIDE")
 for m in MODELS

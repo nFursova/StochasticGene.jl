@@ -64,6 +64,12 @@ export SG_FROM=trace-separate-enhancer-noise-$SG_TAG
 julia --project="$SG_PROJECT" scripts/13_continue_trace_fixnoise.jl     # SG_INTO defaults to $SG_FROM-fixnoise-24h
 ```
 
+## Free Rshift rates
+
+`SG_TIE_RSHIFT=false` fits every Rshift rate separately in all three staging scripts (12, 12_gene,
+14); splice rates stay tied. Result and swarm folders get the suffix `-freeR`, so they never
+collide with the tied runs.
+
 ## Options
 
 `SG_SAMPLES_LIST=3Prime,5Prime`, `SG_CONDITION=enhancer` (or gene), `SG_DATA_3PRIME`,

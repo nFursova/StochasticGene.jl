@@ -9,6 +9,7 @@
 #   SG_BASES=3301,3302,3303,3401,3402,3403,3404
 #   SG_RESULTFOLDER=3and5Prime-stage05-gene-$SG_STAMP
 #   SG_SWARMDIR=swarm-3and5Prime-stage05-gene-$SG_STAMP
+# With SG_TIE_RSHIFT=false (every Rshift rate free) both folder names get the suffix "-freeR".
 # SG_STAMP defaults to today's date (YYYY-MM-DD).
 #
 # Run:
@@ -22,8 +23,9 @@ using Dates
 const STAMP = get(ENV, "SG_STAMP", Dates.format(Dates.today(), "yyyy-mm-dd"))
 get!(ENV, "SG_CONDITION", "gene")
 get!(ENV, "SG_BASES", "3301,3302,3303,3401,3402,3403,3404")
-get!(ENV, "SG_RESULTFOLDER", "3and5Prime-stage05-gene-$STAMP")
-get!(ENV, "SG_SWARMDIR", "swarm-3and5Prime-stage05-gene-$STAMP")
+const SUFFIX = lowercase(get(ENV, "SG_TIE_RSHIFT", "true")) in ("1", "true", "yes", "on") ? "" : "-freeR"
+get!(ENV, "SG_RESULTFOLDER", "3and5Prime-stage05-gene-$STAMP$SUFFIX")
+get!(ENV, "SG_SWARMDIR", "swarm-3and5Prime-stage05-gene-$STAMP$SUFFIX")
 
 ENV["SG_CONDITION"] == "gene" || error("this wrapper stages gene fits; use 12_stage_trace_separate_noise.jl for enhancer")
 any(b -> length(b) == 4 && b[3] != '0', split(ENV["SG_BASES"], ',')) &&
