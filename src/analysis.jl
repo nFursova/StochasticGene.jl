@@ -5135,6 +5135,33 @@ function _write_correlation_job(job, lags, pair_specs; write_legacy, write_gener
 end
 
 """
+    _override_insertstep(model_insertstep, R, override)
+
+Apply a user `insertstep` override to a model's own insertstep.
+
+- `override === nothing`: keep the model's value.
+- Override with one entry per unit: use it as given.
+- Shorter tuple override on a coupled model with hidden units (R = 0): the override values go,
+  in order, to the units that have reporter steps (R > 0); hidden units keep the model's value.
+  E.g. override (3, 3) on a model with R = (3, 3, 0) gives (3, 3, model_insertstep[3]).
+Throws an `ArgumentError` when the override cannot be matched to the model's units.
+"""
+function _override_insertstep(model_insertstep, R, override)
+    override === nothing && return model_insertstep
+    (model_insertstep isa Tuple && override isa Tuple) || return override
+    length(override) == length(model_insertstep) && return override
+    observed = [i for i in eachindex(R) if R[i] > 0]
+    length(override) == length(observed) || throw(ArgumentError(
+        "insertstep override $(override) has $(length(override)) entries, but the model has " *
+        "$(length(model_insertstep)) units of which $(length(observed)) have reporter steps (R = $(R))"))
+    out = collect(model_insertstep)
+    for (k, i) in enumerate(observed)
+        out[i] = override[k]
+    end
+    return Tuple(out)
+end
+
+"""
     write_correlation_functions_key(folder::String; lags=0:200, ratetype="median",
                                     insertstep=nothing, observables=nothing,
                                     pairs=nothing, write_legacy=true,
@@ -5236,7 +5263,7 @@ function write_correlation_functions_key(
                         continue
                     end
                     splicetype = String(get(info, :splicetype, ""))
-                    this_insertstep = isnothing(insertstep) ? info[:insertstep] : insertstep
+                    this_insertstep = _override_insertstep(info[:insertstep], info[:R], insertstep)
                     this_window_interval = _correlation_frame_interval(info, window_interval, trace_center)
                     plan = _correlation_window_plan(lags, trace_center ? window_lengths : nothing, this_window_interval)
                     push!(jobs, (root=root, info=info, r=r, ratefile=ratefile, suffix=suffix,

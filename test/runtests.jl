@@ -1231,6 +1231,15 @@ const FULL_TESTS = get(ENV, "STOCHASTICGENE_FULL_TESTS", "0") == "1"
         end
     end
 
+    @testset "Correlation insertstep override with hidden units" begin
+        f = StochasticGene._override_insertstep
+        @test f((1, 1, 1), (3, 3, 0), nothing) == (1, 1, 1)
+        @test f((1, 1, 1), (3, 3, 0), (3, 3)) == (3, 3, 1)      # hidden third unit keeps its own value
+        @test f((1, 1), (3, 3), (3, 3)) == (3, 3)
+        @test f((2, 2, 1), (3, 3, 0), (1, 1, 1)) == (1, 1, 1)
+        @test_throws ArgumentError f((1, 1, 1), (3, 3, 0), (3,))
+    end
+
     @testset "Coupled dwell-time fit with a hidden unit" begin
         # Sojourn-set reporters (vectors of state vectors) carry no noise parameters.
         @test StochasticGene.num_all_parameters(([1, 2], [2, 1]), 3, 0, 1, [[1, 2], [3]]) ==
