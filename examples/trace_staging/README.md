@@ -45,8 +45,13 @@ SG_FROM=3and5Prime-stage05-gene-$SG_STAMP julia --project="$SG_PROJECT" scripts/
 shared-parameter path of the stage-05 scripts (top -> sample -> trace): noise means per trace,
 noise SDs per sample, Rshift tied, same priors and 21 models as the separate gene script.
 Keys `3Prime-5Prime-trs-<model>-gene`, folder `3and5Prime-joint-gene-$SG_STAMP`.
-Stage B for this path is your `continue_shared_from_results_final.jl` (fixnoise mode);
-`13_continue_trace_fixnoise.jl` is for the classic path of scripts 12 only.
+Stage B for the joint fits is `15_continue_trace_joint_fixnoise.jl` (freezes all noise from each
+model's own fit, refits the shared kinetic rates); `13_continue_trace_fixnoise.jl` is only for
+the separate fits of the 12 scripts.
+
+```bash
+SG_FROM=3and5Prime-joint-gene-$SG_STAMP julia --project="$SG_PROJECT" scripts/15_continue_trace_joint_fixnoise.jl
+```
 
 ```bash
 export SG_STAMP=$(date +%Y-%m-%d)

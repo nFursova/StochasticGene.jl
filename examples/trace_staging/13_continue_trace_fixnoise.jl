@@ -66,6 +66,8 @@ for f in sort(readdir(SRCDIR))
     isfile(ratefile) || (push!(skipped, "$key (no rates file: run not finished?)"); continue)
 
     h = spec[:hierarchical]
+    haskey(spec, :shared_parameters) && spec[:shared_parameters] !== nothing &&
+        error("$key: this is a shared-parameter (joint) run; use 15_continue_trace_joint_fixnoise.jl")
     (h isa Tuple && length(h) == 3) || error("$key: expected classic hierarchical=(nhyper, individual, fixed)")
     nhyper = Int(h[1]); individual = Int.(collect(h[2])); fixedind = h[3]
     n = num_rates(spec[:transitions], spec[:R], spec[:S], spec[:insertstep])
